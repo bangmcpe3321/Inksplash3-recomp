@@ -9,11 +9,11 @@ Updated as milestones land. Every claim links to a log or a measurement.
 | 0 | Runtime baseline hardened + buildable | **done** (`docs/BUILD_SMOKE.md`) |
 | 1 | Splat3 ExeFS/RomFS extracted | **done** (v11.3.0 update; BKTR-merged RomFS 22,857 files / 9.37 GiB) |
 | 2 | NSO images + function tables | in progress |
-| 3 | `main` + `sdk` lifted, unhandled triaged | `sdk` done: 32,676 fns / 4,760 unhandled; `main` running |
+| 3 | `main` + `sdk` lifted, unhandled triaged | **done**: main 272,492 fns / 2,051 unhandled; sdk 32,676 fns / 4,760 |
 | 3 | `main` + `sdk` lifted, unhandled triaged | pending |
-| 4 | Headless boot reaches `nnMain` | pending |
-| 5 | Engine init (heap, NVN device, romfs, UI) | pending |
-| 6 | First frame, headless | pending |
+| 4 | Headless boot reaches `nnMain` | **done** (`logs/boot-null-05/06`) |
+| 5 | Engine init (heap, NVN device, romfs, UI) | **in progress**: heap cb000000, NVN 55/15, romfs mounted, 6.7k init_array entries, NVN pools/command buffers |
+| 6 | First frame, headless | close: NVN draws recorded; traps on generator gaps (`frintn`) being closed |
 | 7 | First frame, Vulkan window | pending |
 | 8 | Title / 2D UI at 720p60 | pending |
 | 9 | First 3D scene (PlayerMake / tutorial) | pending |
@@ -44,3 +44,15 @@ Updated as milestones land. Every claim links to a log or a measurement.
 - Asset compression is **Zstandard** (`.zs` magic `28 b5 2f fd`), not Yaz0 as in Splat2. `Pack/Params.pack.zs` -> SARC, `Model/*.bfres.zs` -> FRES.
 - No `subsdk*`; `main.npdm` lists 49 services, 1 MiB stack, 3 CPU cores.
 - Extraction method and re-run recipe: `docs/EXTRACT_REPORT.md`, `scripts/extract/`.
+
+## Boot findings (v11.3.0)
+
+- Modules use **`DT_RELR`** packed relative relocations (528,692 in main, 15,013 in sdk). The
+  runtime ignored them, so every `.data` pointer kept its link-time base-0 value and
+  `nninitStartup` died on the first dereference. Implemented in `rt_main.cpp relocate()`.
+- `HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs`, `RegionLangMask.txt`,
+  `AddressTable/Product.b30...`, `RomConfig/NormalProduct...` all open from the merged romfs.
+- NVN: device created, `DeviceGetInteger(0)=55`, `(1)=15` accepted; pools, command buffers and
+  draw records appear. The headless null backend records but does not present.
+- Current gap: executed instructions the generator lacks (`frintn v1.4s` first). Use
+  `scripts/regen.sh <module>` (incremental: only changed TUs are rewritten) + rebuild.

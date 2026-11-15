@@ -152,7 +152,23 @@ static void relocate(Module& m) {
             }
         }
     }
-    printf("[ld] %s: %llu relocs, %d unresolved symbol refs\n", m.name, n, unresolved);
+    // DT_RELR (packed relative relocations, `ld -z pack-relative-relocs`): Splatoon 3's modules are built with it,
+    // so most .data pointers are NOT in DT_RELA. Without this every one keeps its link-time (base-0) value and the
+    // first init function dereferences e.g. 0x61eeb68 instead of 0x71061eeb68.
+    u64 nrelr = 0;
+    if (m.dyn[36] && m.dyn[35]) {                      // DT_RELR / DT_RELRSZ (DT_RELRENT is 8 on lp64)
+        const u64* p = (const u64*)(m.base + m.dyn[36]);
+        u64 cnt = m.dyn[35] / 8, where = 0;
+        for (u64 i = 0; i < cnt; i++) {
+            u64 e = p[i];
+            if (!(e & 1)) { where = e; *(u64*)(m.base + where) += m.base; where += 8; nrelr++; }
+            else {
+                for (int k = 0; k < 63; k++) if ((e >> 1) & (1ull << k)) { *(u64*)(m.base + where + 8ull * k) += m.base; nrelr++; }
+                where += 8ull * 63;
+            }
+        }
+    }
+    printf("[ld] %s: %llu relocs, %llu RELR, %d unresolved symbol refs\n", m.name, n, nrelr, unresolved);
 }
 
 // ---------------------------------------------------------------- import tracing

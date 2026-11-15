@@ -266,9 +266,21 @@ NVN(nvnMemoryPoolInitialize) {
 }
 NVN(nvnMemoryPoolFinalize) { void *p = HOST(NvnPool, A(0)); SET_HOST(A(0), 0); if (p) backend_async_call(free, p); }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)c; }
-NVN(nvnMemoryPoolMap) { RET(HOST(NvnPool, A(0))->storage); }
-NVN(nvnMemoryPoolGetBufferAddress) { RET(HOST(NvnPool, A(0))->storage); }  // GPU address == CPU address
-NVN(nvnMemoryPoolGetSize) { RET(HOST(NvnPool, A(0))->size); }
+// A pool whose HLE init never ran (or whose first 8 bytes were zeroed/copied over) used to dereference
+// NULL here. Report it and return 0 instead of dying: the caller's address is what identifies the gap.
+static NvnPool *pool_checked(uint64_t addr, uint64_t lr, const char *who) {
+    NvnPool *p = addr ? HOST(NvnPool, addr) : 0;
+    if (!p) {
+        LOG("[nvn] %s: pool %llx not initialised (lr=%llx) words %llx %llx %llx\n", who,
+            (unsigned long long)addr, (unsigned long long)lr,
+            (unsigned long long)G(uint64_t, addr, 0), (unsigned long long)G(uint64_t, addr, 8),
+            (unsigned long long)G(uint64_t, addr, 0x10));
+    }
+    return p;
+}
+NVN(nvnMemoryPoolMap) { NvnPool *p = pool_checked(A(0), c->x[30], "Map"); RET(p ? p->storage : 0); }
+NVN(nvnMemoryPoolGetBufferAddress) { NvnPool *p = pool_checked(A(0), c->x[30], "GetBufferAddress"); RET(p ? p->storage : 0); }
+NVN(nvnMemoryPoolGetSize) { NvnPool *p = pool_checked(A(0), c->x[30], "GetSize"); RET(p ? p->size : 0); }
 NVN(nvnMemoryPoolGetFlags) {
     uintptr_t h = (uintptr_t)HOST(NvnPool, A(0));
     if (h < 0x10000 || h >> 47) {

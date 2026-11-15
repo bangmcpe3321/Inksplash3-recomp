@@ -1182,6 +1182,8 @@ class Emitter:
     def i_frinti(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 0)')
     def i_frintm(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 2)')
     def i_frintp(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 1)')
+    def i_frintn(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 0)')   # nearest, ties to even
+    def i_frintz(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 3)')   # toward zero
     def i_fmla(self, a, ops):
         d, cnt, esz = varr(ops[0]); f = FF[esz]
         return self._fbin(ops, lambda x, y: f'fmlaA(c->v[{d}].{f}[i], {x}, {y})',
