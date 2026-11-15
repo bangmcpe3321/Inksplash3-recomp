@@ -104,11 +104,15 @@ static thread_local u64 t_tls[kTlsSlots];
 // Fill the guest-visible nn::os::ThreadType fields the SDK's accessors read (SDK 20.5.22 layout,
 // verified against sdk 0x71801418d0 SetupThreadObjectUnsafe): +0x40 state (3 = running), +0x41 alias,
 // +0x44 s16 priority, +0x48 saved stack base, +0x50 live stack base, +0x58 stack size, +0x1a0 name ptr.
-static void tt_fields(u64 tt, u64 base, u64 size, int prio) {
+// +0x1B0 is the thread id the SDK's internal critical section uses as its owner tag (sdk 0x149a4c reads
+// [TPIDRRO+0x1F8]+0x1B0): it must be non-zero and unique, or every fresh mutex looks "locked by me".
+static std::atomic<u32> g_tt_id{1};
+static void tt_fields(u64 tt, u64 base, u64 size, int prio, u32 id = 0) {
     if (!tt) return;
     *(u8*)(tt + 0x40) = 3; *(u8*)(tt + 0x41) = 0;
     *(s16*)(tt + 0x44) = (s16)prio;
     *(u64*)(tt + 0x48) = base; *(u64*)(tt + 0x50) = base; *(u64*)(tt + 0x58) = size;
+    *(u32*)(tt + 0x1b0) = id ? id : g_tt_id++;   // 0 would read as "owner == current thread"
 }
 
 void os_register_main_thread(Ctx* c, u64 stack_lo, u64 stack_size) {
@@ -119,7 +123,7 @@ void os_register_main_thread(Ctx* c, u64 stack_lo, u64 stack_size) {
     // SDK's GetThreadStackInfo reads the live stack base at +0x50 and the size at +0x58; state +0x40 must be
     // 3 for that call to succeed. Without these sead sees [0, size) and Lp::UI::Impl::Name::init shares a
     // caller's stack string instead of copying it (the Splatoon 2 blocker).
-    tt_fields(tt, stack_lo, stack_size, 28);
+    tt_fields(tt, stack_lo, stack_size, 28, 1);
     t->h = GetCurrentThread(); t->tid = GetCurrentThreadId();
     t_self = t;
     (void)c;

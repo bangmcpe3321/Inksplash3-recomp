@@ -493,6 +493,11 @@ Ctx* rt_new_ctx(u64 stack_top, u64* stack_lo, u64* stack_size) {
         if (stack_size) *stack_size = stack_sz;
     }
     u8* tls = (u8*)VirtualAlloc(nullptr, tls_sz, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    // TPIDR_EL0 header used by the SDK's thread-local allocator (main 0x383020): [tpidr+0x10] identifies the
+    // owning thread and is compared with the memory resource's owner; equal means "use the per-thread cache at
+    // [tpidr+0x18]". The runtime creates threads without running the SDK's TLS setup, so set a unique id here:
+    // a zero id matches a zeroed resource owner and dereferences the (never created) cache pointer.
+    *(u64*)(tls + 0x10) = (u64)(GetCurrentThreadId() | 1);
     c->sp = (stack_top - 0x100) & ~15ull; c->tpidr = (u64)tls; c->excl_addr = ~0ull;
     return c;
 }
@@ -842,6 +847,9 @@ int main(int argc, char** argv) {
             // prepo telemetry: its lifted Add fails (msgpack WriteString) and Lp::Utl::PlayReportWrapper
             // aborts on any Add error; dropping reports is the right port behaviour, so leave it stubbed.
             "_ZN2nn5prepo",
+            // Splatoon 3 (SDK 20) service namespaces whose lifted bodies would call sm: / read uninitialised
+            // service objects. Stubbed like the rest: the game treats the Result as "service unavailable".
+            "_ZN2nn3pdm", "_ZN2nn2ec", "_ZN2nn5album", "_ZN2nn3ngc", "_ZN2nn5swkbd", "_ZN2nn3npln",
         };
         const char* verbose = getenv("TOTK_LIFT_ALL_VERBOSE");
         for (u32 i = 0; i < g_imp_count; i++) {

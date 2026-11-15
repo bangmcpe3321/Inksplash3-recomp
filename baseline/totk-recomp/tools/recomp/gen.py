@@ -1237,6 +1237,18 @@ class Emitter:
     def i_frinti(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 0)')
     def i_frintm(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 2)')
     def i_frintp(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 1)')
+    def i_aese(self, a, ops):
+        d, _, _ = varr(ops[0]); n, _, _ = varr(ops[1])
+        return f'c->v[{d}] = aeseA(c->v[{d}], c->v[{n}]);'
+    def i_aesd(self, a, ops):
+        d, _, _ = varr(ops[0]); n, _, _ = varr(ops[1])
+        return f'c->v[{d}] = aesdA(c->v[{d}], c->v[{n}]);'
+    def i_aesmc(self, a, ops):
+        d, _, _ = varr(ops[0]); n, _, _ = varr(ops[1])
+        return f'c->v[{d}] = aesmcA(c->v[{n}]);'
+    def i_aesimc(self, a, ops):
+        d, _, _ = varr(ops[0]); n, _, _ = varr(ops[1])
+        return f'c->v[{d}] = aesimcA(c->v[{n}]);'
     def i_frintn(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 0)')   # nearest, ties to even
     def i_frintz(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 3)')   # toward zero
     def i_fmla(self, a, ops):

@@ -494,3 +494,74 @@ RT_INLINE void lsi(Ctx* __restrict r, LCtx& l) {
 }
 // (padding to the previous length: in-place restore while a stale compile kept this header mapped, 2026-10-16)
 //                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
+
+// ---------------------------------------------------------------- ARMv8 crypto: AES round instructions
+// Splatoon 3's lifted nn::crypto AES-256-CTR (sdk AesImpl::EncryptBlock) runs real AESE/AESD/AESMC/AESIMC.
+// Byte-wise implementation (GF(2^8)); these run a few times per save/crypto operation, not per frame.
+struct AesTab {
+    u8 s[256], si[256];
+    static u8 rotl8(u8 x, int n) { return (u8)((x << n) | (x >> (8 - n))); }
+    static u8 mul(u8 a, u8 b) {
+        u8 r = 0;
+        while (b) { if (b & 1) r ^= a; u8 h = (u8)(a & 0x80); a = (u8)(a << 1); if (h) a ^= 0x1b; b >>= 1; }
+        return r;
+    }
+    static u8 inv(u8 a) {
+        if (!a) return 0;
+        u8 r = 1;
+        for (int i = 0; i < 254; i++) r = mul(r, a);
+        return r;
+    }
+    AesTab() {
+        for (int x = 0; x < 256; x++) {
+            u8 i = inv((u8)x);
+            s[x] = (u8)(i ^ rotl8(i, 1) ^ rotl8(i, 2) ^ rotl8(i, 3) ^ rotl8(i, 4) ^ 0x63);
+        }
+        for (int x = 0; x < 256; x++) si[s[x]] = (u8)x;
+    }
+};
+static const AesTab g_aes_tab;
+
+RT_INLINE u8 aes_mul(u8 a, u8 b) { return AesTab::mul(a, b); }
+RT_INLINE V128 aes_shiftrows(V128 x, bool inv) {
+    V128 r;
+    for (int c = 0; c < 4; c++)
+        for (int row = 0; row < 4; row++)
+            r.b[row + 4 * c] = x.b[row + 4 * ((inv ? (c - row + 8) : (c + row)) & 3)];
+    return r;
+}
+RT_INLINE V128 aes_subbytes(V128 x, bool inv) {
+    V128 r;
+    for (int i = 0; i < 16; i++) r.b[i] = inv ? g_aes_tab.si[x.b[i]] : g_aes_tab.s[x.b[i]];
+    return r;
+}
+RT_INLINE V128 aes_mixcolumns(V128 x, bool inv) {
+    V128 r;
+    for (int c = 0; c < 4; c++) {
+        u8 a0 = x.b[4 * c], a1 = x.b[4 * c + 1], a2 = x.b[4 * c + 2], a3 = x.b[4 * c + 3];
+        if (!inv) {
+            r.b[4 * c]     = (u8)(aes_mul(a0, 2) ^ aes_mul(a1, 3) ^ a2 ^ a3);
+            r.b[4 * c + 1] = (u8)(a0 ^ aes_mul(a1, 2) ^ aes_mul(a2, 3) ^ a3);
+            r.b[4 * c + 2] = (u8)(a0 ^ a1 ^ aes_mul(a2, 2) ^ aes_mul(a3, 3));
+            r.b[4 * c + 3] = (u8)(aes_mul(a0, 3) ^ a1 ^ a2 ^ aes_mul(a3, 2));
+        } else {
+            r.b[4 * c]     = (u8)(aes_mul(a0, 14) ^ aes_mul(a1, 11) ^ aes_mul(a2, 13) ^ aes_mul(a3, 9));
+            r.b[4 * c + 1] = (u8)(aes_mul(a0, 9) ^ aes_mul(a1, 14) ^ aes_mul(a2, 11) ^ aes_mul(a3, 13));
+            r.b[4 * c + 2] = (u8)(aes_mul(a0, 13) ^ aes_mul(a1, 9) ^ aes_mul(a2, 14) ^ aes_mul(a3, 11));
+            r.b[4 * c + 3] = (u8)(aes_mul(a0, 11) ^ aes_mul(a1, 13) ^ aes_mul(a2, 9) ^ aes_mul(a3, 14));
+        }
+    }
+    return r;
+}
+RT_INLINE V128 aeseA(V128 st, V128 key) {   // SubBytes, ShiftRows, AddRoundKey
+    V128 s = aes_shiftrows(aes_subbytes(st, false), false);
+    for (int i = 0; i < 16; i++) s.b[i] ^= key.b[i];
+    return s;
+}
+RT_INLINE V128 aesdA(V128 st, V128 key) {   // InvShiftRows, InvSubBytes, AddRoundKey
+    V128 s = aes_subbytes(aes_shiftrows(st, true), true);
+    for (int i = 0; i < 16; i++) s.b[i] ^= key.b[i];
+    return s;
+}
+RT_INLINE V128 aesmcA(V128 st) { return aes_mixcolumns(st, false); }
+RT_INLINE V128 aesimcA(V128 st) { return aes_mixcolumns(st, true); }

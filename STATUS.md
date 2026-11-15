@@ -12,9 +12,9 @@ Updated as milestones land. Every claim links to a log or a measurement.
 | 3 | `main` + `sdk` lifted, unhandled triaged | **done**: main 272,492 fns / 2,051 unhandled; sdk 32,676 fns / 4,760 |
 | 3 | `main` + `sdk` lifted, unhandled triaged | pending |
 | 4 | Headless boot reaches `nnMain` | **done** (`logs/boot-null-05/06`) |
-| 5 | Engine init (heap, NVN device, romfs, UI) | **in progress**: heap cb000000, NVN 55/15, romfs mounted, 6.7k init_array entries, NVN pools/command buffers |
-| 6 | First frame, headless | close: NVN draws recorded; traps on generator gaps (`frintn`) being closed |
-| 7 | First frame, Vulkan window | pending |
+| 5 | Engine init (heap, NVN device, romfs, UI) | **done**: heap cb000000, NVN 55/15, romfs, audio renderer, HID, save mount, 6.7k init_array entries |
+| 6 | First frame, headless | **done**: `present #5 tex 1920x1080` in `logs/boot-null-11` (null backend records, no output) |
+| 7 | First frame, Vulkan window | next after the AES rebuild |
 | 8 | Title / 2D UI at 720p60 | pending |
 | 9 | First 3D scene (PlayerMake / tutorial) | pending |
 | 10 | Plaza / match scene | pending |
@@ -56,3 +56,17 @@ Updated as milestones land. Every claim links to a log or a measurement.
   draw records appear. The headless null backend records but does not present.
 - Current gap: executed instructions the generator lacks (`frintn v1.4s` first). Use
   `scripts/regen.sh <module>` (incremental: only changed TUs are rewritten) + rebuild.
+
+## Boot sequence fixes (in order found)
+
+1. `DT_RELR` (528,692 main / 15,013 sdk) — implemented in `rt_main.cpp relocate()`.
+2. `frintn` + the rest of the executed generator gaps (see the gen commit).
+3. SDK 20 internal critical section owner id: `ThreadType+0x1B0` must be non-zero and unique, or
+   every fresh mutex reads as "locked by the current thread" and `pthread_mutex_lock` aborts.
+4. TPIDR_EL0 thread-local header: `[tpidr+0x10]` (thread id used by the SDK's thread-local allocator)
+   must be set when the runtime creates a context; zero matched a zeroed resource owner and
+   dereferenced a null per-thread cache (`main 0x383020`).
+5. Service namespaces with lifted bodies that need `sm:`/service objects stubbed: `pdm`, `ec`,
+   `album`, `ngc`, `swkbd`, `npln` added to `kService` (`pdm` crashed in QueryApplicationPlayStatistics).
+6. AES instructions (`aese/aesd/aesmc/aesimc`) implemented byte-wise in `rt.h` for lifted
+   `nn::crypto` AES-256-CTR (save/crypto path).
