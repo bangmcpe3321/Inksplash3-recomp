@@ -2,7 +2,7 @@
 #pragma once
 #include "rt.h"
 
-constexpr int kMaxImports = 1024;
+constexpr int kMaxImports = 4096;   // Splat3's main imports more; the table is host heap, cost is one pointer per slot
 constexpr int kMaxHostFns = 4096;
 u64 rt_host_fn_addr(GuestFn fn);   // host function -> callable guest address
 

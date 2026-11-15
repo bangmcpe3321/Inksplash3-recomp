@@ -47,7 +47,9 @@ GuestFn g_imp[kMaxImports];
 
 static const u64 MAIN_BASE = 0x7100000000ull;
 static const u64 SDK_BASE  = 0x7180000000ull;          // sdk image: data exports + lifted code (gen/sdk)
-static const u64 IMP_FAKE  = MAIN_BASE + 0x5000000ull; // fake code address of import i = IMP_FAKE + 4*i
+// fake code address of import i = g_imp_fake + 4*i. Placed after the loaded main image (not a fixed
+// 0x5000000 window): a larger title image would otherwise overlap the thunk table.
+static u64 g_imp_fake = MAIN_BASE + 0x5000000ull;
 
 [[noreturn]] static void die(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr); fflush(stderr);
@@ -106,7 +108,7 @@ static u64 resolve(Module& m, u32 si, int* unresolved) {
             if (it != g_sdk.exports.end()) return it->second;
         } else {
             auto it = g_imp_index.find(y.name);
-            if (it != g_imp_index.end()) return IMP_FAKE + 4ull * it->second;
+            if (it != g_imp_index.end()) return g_imp_fake + 4ull * it->second;
         }
     } else {
         auto it = g_main.exports.find(y.name);
@@ -724,12 +726,15 @@ int main(int argc, char** argv) {
     for (u32 i = 0; i < g_imp_count; i++) g_imp_index[g_imp_names[i]] = i;
 
     load_module(g_main, dir + "/main.bin");
+    // imports (and the host-fn slots) live in fake code addresses right after the main image, with a 16 MB gap.
+    {   u64 end = (g_main.size + 0xFFFFFull) & ~0xFFFFFull;
+        if (MAIN_BASE + end + 0x1000000ull > g_imp_fake) g_imp_fake = MAIN_BASE + end + 0x1000000ull; }
     load_module(g_sdk, dir + "/sdk.bin");
     relocate(g_sdk);
     relocate(g_main);
 
     // function table: every FDE start, plus the import fake addresses
-    g_ftab_n = (IMP_FAKE - MAIN_BASE) / 4 + kMaxImports + kMaxHostFns;
+    g_ftab_n = (g_imp_fake - MAIN_BASE) / 4 + kMaxImports + kMaxHostFns;
     g_ftab = (GuestFn*)VirtualAlloc(nullptr, g_ftab_n * sizeof(GuestFn), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     for (u64 i = 0; i < g_ftab_count; i++) g_ftab[g_ftab_init[i].off >> 2] = g_ftab_init[i].fn;
     // sdk function table (sdk .text only)
@@ -774,7 +779,7 @@ int main(int argc, char** argv) {
         if (lf) { g_hle[i] = lf; nlift++; }
         else if (it != hle_table().end()) { g_hle[i] = it->second; nhle++; }
         g_imp[i] = k_thunks[i];
-        g_ftab[(IMP_FAKE - MAIN_BASE) / 4 + i] = k_thunks[i];
+        g_ftab[(g_imp_fake - MAIN_BASE) / 4 + i] = k_thunks[i];
     }
     // TOTK_LIFT_ALL=1: every remaining main import the sdk implements runs its real lifted body instead of the stub that
     // returns 0. The HLE above still wins (those are the ones that need a host service behind them), so only the names
@@ -914,6 +919,6 @@ u64 rt_host_fn_addr(GuestFn fn) {
     static std::atomic<u32> next{0};
     u32 i = next++;
     if (i >= (u32)kMaxHostFns) { fprintf(stderr, "[rt] out of host fn slots\n"); abort(); }
-    g_ftab[(IMP_FAKE - MAIN_BASE) / 4 + kMaxImports + i] = fn;
-    return IMP_FAKE + 4ull * (kMaxImports + i);
+    g_ftab[(g_imp_fake - MAIN_BASE) / 4 + kMaxImports + i] = fn;
+    return g_imp_fake + 4ull * (kMaxImports + i);
 }
