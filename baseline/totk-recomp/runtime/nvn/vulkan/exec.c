@@ -2844,15 +2844,18 @@ static VkBlendOp blend_op(uint8_t e) {
     }
 }
 
+// NVNdepthFunc shares NVNcompareFunc's 0-based numbering (NEVER=0 .. ALWAYS=7). The old 1-based table
+// shifted every request by one: a pipeline asking for LESS_EQUAL got EQUAL, which with reversed-Z depth
+// turned the ground into per-frame z-fighting (the "shimmer"/shake that only the 3D layer showed).
 static VkCompareOp compare_fn(uint8_t f) {
     switch (f) {
-    case 1: return VK_COMPARE_OP_NEVER;
-    case 2: return VK_COMPARE_OP_LESS;
-    case 3: return VK_COMPARE_OP_EQUAL;
-    case 4: return VK_COMPARE_OP_LESS_OR_EQUAL;
-    case 5: return VK_COMPARE_OP_GREATER;
-    case 6: return VK_COMPARE_OP_NOT_EQUAL;
-    case 7: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    case 0: return VK_COMPARE_OP_NEVER;
+    case 1: return VK_COMPARE_OP_LESS;
+    case 2: return VK_COMPARE_OP_EQUAL;
+    case 3: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case 4: return VK_COMPARE_OP_GREATER;
+    case 5: return VK_COMPARE_OP_NOT_EQUAL;
+    case 6: return VK_COMPARE_OP_GREATER_OR_EQUAL;
     default: return VK_COMPARE_OP_ALWAYS;
     }
 }

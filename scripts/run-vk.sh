@@ -43,5 +43,6 @@ exec podman run --rm --device /dev/dri \
   -e LARECOMP_VK_NO_HEAP_MIRROR="${LARECOMP_VK_NO_HEAP_MIRROR:-}" -e TOTK_PROF="${TOTK_PROF:-}" \
   -e LARECOMP_VK_PROF="${LARECOMP_VK_PROF:-}" -e LARECOMP_VK_PRESENT="${LARECOMP_VK_PRESENT:-}" \
   -e TOTK_RES_SCALE="${TOTK_RES_SCALE:-}" -e TOTK_OUT_SCALE="${TOTK_OUT_SCALE:-}" -e TOTK_AA="${TOTK_AA:-}" \
+  -e TOTK_DYNRES="${TOTK_DYNRES:-}" -e TOTK_FPS="${TOTK_FPS:-}" -e TOTK_UNLOCK_FPS="${TOTK_UNLOCK_FPS:-}" \
   -v "$host_work:/w:z" -w /w/build-vk "$IMAGE" \
   bash "/w/port/Splat3-Recomp/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"
