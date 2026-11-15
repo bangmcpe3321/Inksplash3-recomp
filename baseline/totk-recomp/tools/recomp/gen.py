@@ -592,6 +592,14 @@ class Emitter:
     def i_negs(self, a, ops): n = gsize(ops[0]); return W(ops[0], f'subs{n}(c, 0, {op2(ops[1:], n)})')
     def i_adcs(self, a, ops): n = gsize(ops[0]); return W(ops[0], f'adds{n}(c, {R(ops[1])}, {R(ops[2])}, c->c)')
     def i_sbcs(self, a, ops): n = gsize(ops[0]); return W(ops[0], f'adds{n}(c, {R(ops[1])}, ~({T(n)})({R(ops[2])}), c->c)')
+    def i_adc(self, a, ops):  # Rn + Rm + C, flags unchanged
+        n = gsize(ops[0]); a1, b1 = R(ops[1]), R(ops[2])
+        return W(ops[0], (f'(u64)((u128)({a1}) + ({b1}) + (u64)c->c)' if n == 64 else
+                          f'(u32)((u64)(u32)({a1}) + (u32)({b1}) + c->c)'))
+    def i_sbc(self, a, ops):  # Rn + ~Rm + C, flags unchanged
+        n = gsize(ops[0]); a1, b1 = R(ops[1]), R(ops[2])
+        return W(ops[0], (f'(u64)((u128)({a1}) + (u64)~({b1}) + (u64)c->c)' if n == 64 else
+                          f'(u32)((u64)(u32)({a1}) + (u32)~({b1}) + c->c)'))
     def i_ngcs(self, a, ops): n = gsize(ops[0]); return W(ops[0], f'adds{n}(c, 0, ~({T(n)})({R(ops[1])}), c->c)')
 
     def _logic(self, ops, op, inv=False, flags=False):
@@ -989,7 +997,13 @@ class Emitter:
         body = (f'(i < {h} ? {fn(f"c->v[{n}].{f}[2*i]", f"c->v[{n}].{f}[2*i+1]")} : '
                 f'{fn(f"c->v[{m_}].{f}[2*(i-{h})]", f"c->v[{m_}].{f}[2*(i-{h})+1]")})')
         return lanes_loop(d, cnt, esz, body, f)
-    def i_addp(self, a, ops): d, cnt, esz = varr(ops[0]); return self._pairwise(ops, lambda x, y: f'({UT[esz]})({x} + {y})', 'u')
+    def i_addp(self, a, ops):
+        if len(ops) == 2:   # scalar ADDP Dd, Vn.2D  /  Sd, Vn.2S (floating-point pairwise add)
+            n, cnt, esz = varr(ops[1])
+            if esz == 64: return fwrite(ops[0], f'faddS(c->v[{n}].fd[0], c->v[{n}].fd[1])')
+            if esz == 32: return fwrite(ops[0], f'faddS(c->v[{n}].f[0], c->v[{n}].f[1])')
+            raise Unhandled('addp scalar ' + ' '.join(ops))
+        d, cnt, esz = varr(ops[0]); return self._pairwise(ops, lambda x, y: f'({UT[esz]})({x} + {y})', 'u')
     def i_sminp(self, a, ops): return self._pairwise(ops, lambda x, y: f'({x} < {y} ? {x} : {y})', 's')
     def i_faddp(self, a, ops):
         # Scalar FADDP Sd, Vn.2S (and Dd, Vn.2D): add the two lanes into the scalar
@@ -1010,6 +1024,17 @@ class Emitter:
         return (f'{{ {t} acc_ = c->v[{n}].{f}[0]; LANES(1, {cnt}, acc_ = {fn("acc_", f"c->v[{n}].{f}[i]", t)}); '
                 f'V128 r_ = vzero(); r_.{f}[0] = acc_; c->v[{d}] = r_; }}')
     def i_addv(self, a, ops): return self._reduce(ops, lambda x, y, t: f'({t})({x} + {y})', 'u', 0)
+    def _addlv(self, ops, signed):
+        k, d = freg(ops[0]); n, cnt, esz = varr(ops[1])
+        f = SF[esz] if signed else UF[esz]
+        st = 's64' if signed else 'u64'
+        tail = {'h': f'c->v[{d}] = vU16((u16)acc_);', 's': f'c->v[{d}] = vU32((u32)acc_);',
+                'd': f'c->v[{d}] = vU64((u64)acc_);'}.get(k)
+        if not tail: raise Unhandled('addlv dest ' + ops[0])
+        return (f'{{ {st} acc_ = ({st})c->v[{n}].{f}[0]; '
+                f'LANES(1, {cnt}, acc_ = acc_ + ({st})c->v[{n}].{f}[i]); {tail} }}')
+    def i_uaddlv(self, a, ops): return self._addlv(ops, False)
+    def i_saddlv(self, a, ops): return self._addlv(ops, True)
     def i_sminv(self, a, ops): return self._reduce(ops, lambda x, y, t: f'({x} < {y} ? {x} : {y})', 's', 0)
     def i_fmaxnmv(self, a, ops):  # ARM reduces pairwise tree for 4s: max(max(a0,a1),max(a2,a3))
         k, d = freg(ops[0]); n, cnt, esz = varr(ops[1])
@@ -1054,9 +1079,35 @@ class Emitter:
     def i_ushll(self, a, ops): return self._widen(ops, False, False, True)
     def i_ushll2(self, a, ops): return self._widen(ops, False, True, True)
     def i_shll(self, a, ops): return self._widen(ops, False, False, True)
+    def _widemul(self, ops, signed, part2, acc):
+        d, cnt, esz = varr(ops[0]); n, ncnt, nesz = varr(ops[1])
+        m_, _, _ = varr(ops[2]); off = ncnt if part2 else 0
+        fs = SF[nesz] if signed else UF[nesz]
+        fd = SF[esz] if signed else UF[esz]
+        x = f'c->v[{n}].{fs}[i + {off}]'; y = f'c->v[{m_}].{fs}[i + {off}]'
+        prod = f'({STT[esz]})({x}) * ({STT[esz]})({y})' if signed else f'({UT[esz]})({x}) * ({UT[esz]})({y})'
+        body = f'(r_.{fd}[i] + {prod})' if acc else prod
+        if acc:
+            return f'{{ V128 r_ = c->v[{d}]; LANES(0, {cnt}, r_.{fd}[i] = {body}); c->v[{d}] = r_; }}'
+        return lanes_loop(d, cnt, esz, body, fd)
+    def i_umull(self, a, ops):
+        if is_gpr(ops[0]): return W(ops[0], f'(u64)(u32){R(ops[1])} * (u64)(u32){R(ops[2])}')
+        return self._widemul(ops, False, False, False)
+    def i_umull2(self, a, ops): return self._widemul(ops, False, True, False)
+    def i_umlal(self, a, ops): return self._widemul(ops, False, False, True)
+    def i_umlal2(self, a, ops): return self._widemul(ops, False, True, True)
+    def i_smull(self, a, ops):
+        if is_gpr(ops[0]): return W(ops[0], f'(u64)((s64)(s32){R(ops[1])} * (s64)(s32){R(ops[2])})')
+        return self._widemul(ops, True, False, False)
+    def i_smull2(self, a, ops): return self._widemul(ops, True, True, False)
+    def i_smlal(self, a, ops): return self._widemul(ops, True, False, True)
+    def i_smlal2(self, a, ops): return self._widemul(ops, True, True, True)
     def i_uaddw(self, a, ops):
         d, cnt, esz = varr(ops[0]); n, _, _ = varr(ops[1]); m_, _, mesz = varr(ops[2])
         return lanes_loop(d, cnt, esz, f'({UT[esz]})(c->v[{n}].{UF[esz]}[i] + c->v[{m_}].{UF[mesz]}[i])', UF[esz])
+    def i_uaddw2(self, a, ops):
+        d, cnt, esz = varr(ops[0]); n, _, _ = varr(ops[1]); m_, _, mesz = varr(ops[2])
+        return lanes_loop(d, cnt, esz, f'({UT[esz]})(c->v[{n}].{UF[esz]}[i] + c->v[{m_}].{UF[mesz]}[i + {cnt}])', UF[esz])
     def _narrow(self, ops, fn, part2, signed_src=False):
         d, cnt, esz = varr(ops[0]); n, ncnt, nesz = varr(ops[1])
         fs = SF[nesz] if signed_src else UF[nesz]
@@ -1162,6 +1213,10 @@ class Emitter:
         x = f'c->v[{n}].{f}[i]'
         if absval: x, y = f'std::fabs({x})', f'std::fabs({y})'
         return lanes_loop(d, cnt, esz, f'({x} {op} {y}) ? ({t})~0ull : ({t})0', UF[esz])
+    def i_cmlt(self, a, ops): return self._vcmp(ops, '<', True)
+    def i_cmge(self, a, ops): return self._vcmp(ops, '>=', True)
+    def i_cmle(self, a, ops): return self._vcmp(ops, '<=', True)
+    def i_cmhs(self, a, ops): return self._vcmp(ops, '>=', False)
     def i_fcmeq(self, a, ops): return self._fcmpv(ops, '==')
     def i_fcmge(self, a, ops): return self._fcmpv(ops, '>=')
     def i_fcmgt(self, a, ops): return self._fcmpv(ops, '>')
@@ -1185,10 +1240,24 @@ class Emitter:
     def i_frintn(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 0)')   # nearest, ties to even
     def i_frintz(self, a, ops): return self._fun(ops, lambda x: f'frintA({x}, 3)')   # toward zero
     def i_fmla(self, a, ops):
+        if FREG.match(ops[0]):        # scalar: Sd = Sd + Sn * Sm (incl. by-element v1.s[2])
+            dv, _ = fscal(ops[0]); x, _ = fscal(ops[1])
+            if VELEM.match(ops[2]):
+                m_, e, j = velem(ops[2]); y = f'c->v[{m_}].{FF[e]}[{j}]'
+            else:
+                y, _ = fscal(ops[2])
+            return fwrite(ops[0], f'fmlaS({dv}, {x}, {y})')
         d, cnt, esz = varr(ops[0]); f = FF[esz]
         return self._fbin(ops, lambda x, y: f'fmlaA(c->v[{d}].{f}[i], {x}, {y})',
                           nat=lambda x, y: f'std::fma({x}, {y}, c->v[{d}].{f}[i])', vop=4)
     def i_fmls(self, a, ops):
+        if FREG.match(ops[0]):        # scalar: Sd = Sd - Sn * Sm
+            dv, _ = fscal(ops[0]); x, _ = fscal(ops[1])
+            if VELEM.match(ops[2]):
+                m_, e, j = velem(ops[2]); y = f'c->v[{m_}].{FF[e]}[{j}]'
+            else:
+                y, _ = fscal(ops[2])
+            return fwrite(ops[0], f'fmlaS({dv}, -({x}), {y})')
         d, cnt, esz = varr(ops[0]); f = FF[esz]
         return self._fbin(ops, lambda x, y: f'fmlaA(c->v[{d}].{f}[i], -({x}), {y})',
                           nat=lambda x, y: f'std::fma(-({x}), {y}, c->v[{d}].{f}[i])', vop=5)
