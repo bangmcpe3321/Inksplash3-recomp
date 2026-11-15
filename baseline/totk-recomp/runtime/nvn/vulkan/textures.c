@@ -1428,15 +1428,19 @@ VkImageView vk_dummy_view(int textype) {
 }
 
 // ================================================================== samplers
+// NVNcompareFunc is 0-based (NEVER=0, LESS=1, EQUAL=2, LESS_EQUAL=3, GREATER=4, NOT_EQUAL=5,
+// GREATER_EQUAL=6, ALWAYS=7). The old 1-based table shifted every request: a sampler asking for GREATER (the
+// NVN default, 4) got LESS_OR_EQUAL, and with reversed-Z shadow maps that fails every lookup -> shadows
+// rendered pure black. TotK's sampler defaults hid it because its shadow path compares the other way.
 static VkCompareOp compare_op(uint32_t f) {
     switch (f) {
-    case 1: return VK_COMPARE_OP_NEVER;
-    case 2: return VK_COMPARE_OP_LESS;
-    case 3: return VK_COMPARE_OP_EQUAL;
-    case 4: return VK_COMPARE_OP_LESS_OR_EQUAL;
-    case 5: return VK_COMPARE_OP_GREATER;
-    case 6: return VK_COMPARE_OP_NOT_EQUAL;
-    case 7: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    case 0: return VK_COMPARE_OP_NEVER;
+    case 1: return VK_COMPARE_OP_LESS;
+    case 2: return VK_COMPARE_OP_EQUAL;
+    case 3: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case 4: return VK_COMPARE_OP_GREATER;
+    case 5: return VK_COMPARE_OP_NOT_EQUAL;
+    case 6: return VK_COMPARE_OP_GREATER_OR_EQUAL;
     default: return VK_COMPARE_OP_ALWAYS;
     }
 }

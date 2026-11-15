@@ -39,6 +39,6 @@ exec podman run --rm --device /dev/dri \
   -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}" -e DISPLAY="${DISPLAY:-:0}" \
   -e TOTK_PRESS="${TOTK_PRESS:-}" -e TOTK_PC_INPUT="${TOTK_PC_INPUT:-1}" \
   -e TOTK_NVN_INT="${TOTK_NVN_INT:-}" -e TOTK_SHOT_EVERY="${TOTK_SHOT_EVERY:-}" -e TOTK_SHOT_RANGE="${TOTK_SHOT_RANGE:-}" \
-  -e TIMEOUT="$TIMEOUT" -e TOTK_LIFT_ALL="$LIFT_ALL" \
+  -e TIMEOUT="$TIMEOUT" -e TOTK_LIFT_ALL="$LIFT_ALL" -e LARECOMP_NO_SHADOW="${LARECOMP_NO_SHADOW:-}" \
   -v "$host_work:/w:z" -w /w/build-vk "$IMAGE" \
   bash "/w/port/Splat3-Recomp/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"
