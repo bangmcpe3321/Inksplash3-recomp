@@ -25,7 +25,7 @@ for m in "${mods[@]}"; do
 
   extra=()
   case "$m" in
-    main)    extra=(--hook 7a83e4) ;;                 # TotK-specific hook; harmless placeholder for now
+    main)    extra=() ;;                               # no TotK --hook: 0x7a83e4 is arbitrary code in Splat3
     sdk)     extra=(--base 0x7180000000 --prefix s --plt-all) ;;
     subsdk0) extra=(--base 0x7200000000 --prefix v --plt-all) ;;
     subsdk1) extra=(--base 0x7280000000 --prefix w --plt-all) ;;
