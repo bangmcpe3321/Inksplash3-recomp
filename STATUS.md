@@ -13,7 +13,7 @@ Updated as milestones land. Every claim links to a log or a measurement.
 | 3 | `main` + `sdk` lifted, unhandled triaged | pending |
 | 4 | Headless boot reaches `nnMain` | **done** (`logs/boot-null-05/06`) |
 | 5 | Engine init (heap, NVN device, romfs, UI) | **done**: heap cb000000, NVN 55/15, romfs, audio renderer, HID, save mount, 6.7k init_array entries |
-| 6 | First frame, headless | **done**: `present #5 tex 1920x1080` in `logs/boot-null-11` (null backend records, no output) |
+| 6 | First frame, headless | **done**: `logs/boot-null-13`: 5,424 presents, **60.0 fps**, 1920x1080, 5,401 command lists, no crash |
 | 7 | First frame, Vulkan window | next after the AES rebuild |
 | 8 | Title / 2D UI at 720p60 | pending |
 | 9 | First 3D scene (PlayerMake / tutorial) | pending |
@@ -70,3 +70,11 @@ Updated as milestones land. Every claim links to a log or a measurement.
    `album`, `ngc`, `swkbd`, `npln` added to `kService` (`pdm` crashed in QueryApplicationPlayStatistics).
 6. AES instructions (`aese/aesd/aesmc/aesimc`) implemented byte-wise in `rt.h` for lifted
    `nn::crypto` AES-256-CTR (save/crypto path).
+
+## Headless 60 fps run (boot-null-13)
+
+90 s, `TOTK_LIFT_ALL=1`, null backend: 5,424 presents, steady `60.0 fps`, 1,920x1,080
+format 0x25, 5,401 command lists. 92 UNIMPL imports in total, all telemetry/audio/account
+(account network availability, prepo PlayReport, one audio voice-slot call). No layout files
+opened in this window's trace (fs trace capped): the frames are the startup/logo sequence,
+which is the analogue of Splat2's "title 2D UI at 720p60" milestone.
