@@ -7,8 +7,9 @@ Updated as milestones land. Every claim links to a log or a measurement.
 | # | Milestone | State |
 |---|---|---|
 | 0 | Runtime baseline hardened + buildable | **done** (`docs/BUILD_SMOKE.md`) |
-| 1 | Splat3 ExeFS/RomFS extracted | **ExeFS done** (v11.3.0 update; base v1.0 NCA has no code); RomFS/BKTR pending |
+| 1 | Splat3 ExeFS/RomFS extracted | **done** (v11.3.0 update; BKTR-merged RomFS 22,857 files / 9.37 GiB) |
 | 2 | NSO images + function tables | in progress |
+| 3 | `main` + `sdk` lifted, unhandled triaged | `sdk` done: 32,676 fns / 4,760 unhandled; `main` running |
 | 3 | `main` + `sdk` lifted, unhandled triaged | pending |
 | 4 | Headless boot reaches `nnMain` | pending |
 | 5 | Engine init (heap, NVN device, romfs, UI) | pending |
@@ -36,3 +37,10 @@ Updated as milestones land. Every claim links to a log or a measurement.
 - NVN: 455/536 proc names already implemented in the runtime's 460-proc layer.
 - No `subsdk*`: NVN and `nn::vi` are inside `sdk`; the two-module loader fits.
 - Full analysis: `docs/SPLAT2_TO_SPLAT3.md`.
+
+## Data facts
+
+- RomFS: 22,857 files, 10,058,171,877 B, 127 dirs, 33 top-level. `Layout/` 593, `Model/` 3,287, `Sound/` 1,604, `Pack/` 8,210.
+- Asset compression is **Zstandard** (`.zs` magic `28 b5 2f fd`), not Yaz0 as in Splat2. `Pack/Params.pack.zs` -> SARC, `Model/*.bfres.zs` -> FRES.
+- No `subsdk*`; `main.npdm` lists 49 services, 1 MiB stack, 3 CPU cores.
+- Extraction method and re-run recipe: `docs/EXTRACT_REPORT.md`, `scripts/extract/`.
