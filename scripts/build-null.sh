@@ -20,7 +20,7 @@ DEPS=${DEPS:-/w/deps}
 SYSLIB=${SYSLIB:-/w/syslib}
 SYSINC=${SYSINC:-/w/deps/libshaderc/include}
 OUT=${OUT:-/w/build-null}
-POOL=${POOL:-4}
+POOL=${POOL:-2}   # 2 generated TUs at a time: clang -O1 can reach ~1.5 GB each
 
 # clang-19 / clang++-19 do not exist in this image; mkninja_linux.py defaults to them.
 export CC=clang CXX=clang++
@@ -44,15 +44,15 @@ if [ -d /w/port/Splat3-Recomp/baseline/totk-recomp ]; then
   exit $?
 fi
 
-# ---- on the host: find WORK (this script lives in WORK/port/scripts) and re-enter
+# ---- on the host: find WORK (this script lives in WORK/port/Splat3-Recomp/scripts) and re-enter
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 host_work=$(cd "$here/../../.." && pwd)
-if [ ! -d "$host_work/port/totk-recomp" ]; then
-  echo "error: $host_work/port/totk-recomp not found (run this from WORK/port/scripts)" >&2
+if [ ! -d "$host_work/port/Splat3-Recomp/baseline/totk-recomp" ]; then
+  echo "error: $host_work/port/Splat3-Recomp/baseline/totk-recomp not found (run this from WORK/port/Splat3-Recomp/scripts)" >&2
   exit 1
 fi
 exec podman run --rm \
   -e GEN="$GEN" -e OBJ="$OBJ" -e DEPS="$DEPS" -e SYSLIB="$SYSLIB" -e SYSINC="$SYSINC" \
   -e OUT="$OUT" -e POOL="$POOL" \
   -v "$host_work:/w:z" -w /w/port/Splat3-Recomp/baseline/totk-recomp "$IMAGE" \
-  bash "/w/port/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"
+  bash "/w/port/Splat3-Recomp/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"

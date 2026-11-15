@@ -60,4 +60,4 @@ exec podman run --rm \
   -e BIN="$BIN" -e OUT="$OUT" -e TOTK_IMG="$TOTK_IMG" -e TOTK_ROMFS="$TOTK_ROMFS" \
   -e TIMEOUT="$TIMEOUT" -e TOTK_LIFT_ALL="$LIFT_ALL" -e EXTRA_ARGS="$EXTRA_ARGS" -e TOTK_NVN_INT="$TOTK_NVN_INT" \
   -v "$host_work:/w:z" -w /w/port/Splat3-Recomp/baseline/totk-recomp "$IMAGE" \
-  bash "/w/port/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"
+  bash "/w/port/Splat3-Recomp/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"

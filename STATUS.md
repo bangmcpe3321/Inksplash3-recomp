@@ -22,7 +22,7 @@ Updated as milestones land. Every claim links to a log or a measurement.
 ## Environment facts
 
 - Host work dir: `/mnt/SSD Storage/Games/Ports/Switch/Splat3/Work` (mounted at `/w` in containers).
-- Runtime repo (this): `Work/port/Splat3-Recomp` — Forgejo `wingrepo/Splat3-Recomp`.
+- Runtime repo (this): `Work/port/Splat3-Recomp` — GitHub `azlekayn/Inksplash3-recomp`, Forgejo `wingrepo/Splat3-Recomp`.
 - Game data: `Work/data/{exefs,romfs,img,funcs}` (never committed).
 - Generated C++: `Work/gen/{main,sdk,...}`; objects: `Work/obj`; builds: `Work/build-*`.
 - Generator venv: `Work/toolchain/venv` (capstone 5.0.9).

@@ -61,6 +61,7 @@ struct Sym { std::string name; u8 type; u16 shndx; u64 value; };
 struct Module {
     const char* name; u64 base, size;
     u64 dyn[64] = {};           // DT_* < 64
+    u64 gnu_hash = 0;           // DT_GNU_HASH (0x6ffffffb) is >= 64, kept separately
     std::vector<Sym> syms;
     std::unordered_map<std::string, u64> exports;   // name -> absolute address
 };
@@ -83,9 +84,26 @@ static void load_module(Module& m, const std::string& path) {
         u64 tag = *(u64*)d, val = *(u64*)(d + 8);
         if (tag == 0) break;
         if (tag < 64) m.dyn[tag] = val;
+        else if (tag == 0x6ffffef5) m.gnu_hash = val;   // DT_GNU_HASH
     }
     u64 symtab = m.base + m.dyn[6], strtab = m.base + m.dyn[5];
-    u32 nsyms = *(u32*)(m.base + m.dyn[4] + 4);          // DT_HASH nchain
+    // Symbol count: DT_HASH (nchain) when present, else DT_GNU_HASH. Splatoon 3's sdk is GNU-hash only
+    // (no DT_HASH), where the old code read a garbage count at m.base+4 and walked off the symtab.
+    u32 nsyms;
+    if (m.dyn[4]) nsyms = *(u32*)(m.base + m.dyn[4] + 4);
+    else if (m.gnu_hash) {
+        u64 gh = m.base + m.gnu_hash;
+        u32 nbuckets = *(u32*)gh, symoff = *(u32*)(gh + 4), bloom_size = *(u32*)(gh + 8);
+        if (nbuckets > 0x100000 || symoff > 0x100000 || bloom_size > 0x10000)   // not a hash table: use the extent
+            { nsyms = (u32)((m.dyn[5] - m.dyn[6]) / 24); goto have_syms; }
+        u64 buckets = gh + 16 + (u64)bloom_size * 8, chains = buckets + (u64)nbuckets * 4;
+        u32 last = 0;
+        for (u32 i = 0; i < nbuckets; i++) { u32 b = *(u32*)(buckets + i * 4); if (b > last) last = b; }
+        if (!last) nsyms = symoff;
+        else { u64 c = chains + (u64)(last - symoff) * 4; while (!(*(u32*)c & 1)) c += 4;
+               nsyms = symoff + (u32)((c - chains) / 4) + 1; }
+    } else nsyms = (u32)((m.dyn[5] - m.dyn[6]) / 24);   // STRTAB - SYMTAB
+have_syms: ;
     for (u32 i = 0; i < nsyms; i++) {
         u64 s = symtab + i * 24ull;
         Sym y{ std::string((const char*)(strtab + *(u32*)s)), (u8)(*(u8*)(s + 4) & 0xF), *(u16*)(s + 6), *(u64*)(s + 8) };

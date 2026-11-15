@@ -1,10 +1,10 @@
-# Splat3-Recomp
+# Inksplash3-recomp
 
 Static recompilation of **Splatoon 3** (base title `0100C2500FC20000`, USA v65536) to native
 Linux x86-64, built on the MIT-licensed [totk-recomp](https://github.com/Muhammad1259-sigma/totk-recomp)
 runtime and NVN-on-Vulkan renderer.
 
-This is the sibling project of `Splat2-ReTotK`. The runtime baseline under `baseline/totk-recomp/`
+This is the sibling project of `Splat2-ReTotK` (GitHub `azlekayn/Inksplash3-recomp`, Forgejo `wingrepo/Splat3-Recomp`). The runtime baseline under `baseline/totk-recomp/`
 is the same vendored tree plus every game-agnostic fix made while getting Splatoon 2 to boot,
 render its title screen, PlayerMake and the tutorial 3D room (see `docs/`).
 
