@@ -20,6 +20,7 @@ inner() {
   ( cd "$OUT" && \
     TOTK_IMG=/w/data/img TOTK_ROMFS=/w/data/romfs TOTK_LIFT_ALL="$LIFT_ALL" \
     TOTK_PRESS="${TOTK_PRESS:-}" TOTK_PC_INPUT="${TOTK_PC_INPUT:-1}" TOTK_NVN_INT="${TOTK_NVN_INT:-}" \
+    TOTK_SHOT_EVERY="${TOTK_SHOT_EVERY:-}" TOTK_SHOT_RANGE="${TOTK_SHOT_RANGE:-}" \
     timeout -k 5 "$TIMEOUT" "$BIN" ) >"$log" 2>&1
   rc=$?
   set -e
@@ -37,6 +38,7 @@ exec podman run --rm --device /dev/dri \
   -e XDG_RUNTIME_DIR=/run/user/$UIDH \
   -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}" -e DISPLAY="${DISPLAY:-:0}" \
   -e TOTK_PRESS="${TOTK_PRESS:-}" -e TOTK_PC_INPUT="${TOTK_PC_INPUT:-1}" \
-  -e TOTK_NVN_INT="${TOTK_NVN_INT:-}" -e TIMEOUT="$TIMEOUT" -e TOTK_LIFT_ALL="$LIFT_ALL" \
+  -e TOTK_NVN_INT="${TOTK_NVN_INT:-}" -e TOTK_SHOT_EVERY="${TOTK_SHOT_EVERY:-}" -e TOTK_SHOT_RANGE="${TOTK_SHOT_RANGE:-}" \
+  -e TIMEOUT="$TIMEOUT" -e TOTK_LIFT_ALL="$LIFT_ALL" \
   -v "$host_work:/w:z" -w /w/build-vk "$IMAGE" \
   bash "/w/port/Splat3-Recomp/scripts/$(basename "${BASH_SOURCE[0]}")" "$@"

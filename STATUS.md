@@ -14,9 +14,9 @@ Updated as milestones land. Every claim links to a log or a measurement.
 | 4 | Headless boot reaches `nnMain` | **done** (`logs/boot-null-05/06`) |
 | 5 | Engine init (heap, NVN device, romfs, UI) | **done**: heap cb000000, NVN 55/15, romfs, audio renderer, HID, save mount, 6.7k init_array entries |
 | 6 | First frame, headless | **done**: `logs/boot-null-13`: 5,424 presents, **60.0 fps**, 1920x1080, 5,401 command lists, no crash |
-| 7 | First frame, Vulkan window | next after the AES rebuild |
-| 8 | Title / 2D UI at 720p60 | pending |
-| 9 | First 3D scene (PlayerMake / tutorial) | pending |
+| 7 | First frame, Vulkan window | **done**: `logs/vk-1.log`, 3,015 frames, 1920x1080 window |
+| 8 | Title / 2D UI at 720p60 | **done in the same run**: intro cutscene and PlayerMake UI render with text |
+| 9 | First 3D scene (PlayerMake / tutorial) | **PlayerMake 3D done**: skinned Inkling, clothing UI, legible text (`frames/vk-01`); tutorial next |
 | 10 | Plaza / match scene | pending |
 
 ## Environment facts
@@ -78,3 +78,14 @@ format 0x25, 5,401 command lists. 92 UNIMPL imports in total, all telemetry/audi
 (account network availability, prepo PlayReport, one audio voice-slot call). No layout files
 opened in this window's trace (fs trace capped): the frames are the startup/logo sequence,
 which is the analogue of Splat2's "title 2D UI at 720p60" milestone.
+
+## Vulkan run vk-1 (first windowed session)
+
+100 s, 1,920x1,080 window, Intel/AMD via Vulkan, `TOTK_PRESS="A@240+120x300"`:
+- intro cutscene (night sky/horizon) -> PlayerMake character creation, 3,015 frames,
+  ~32.5 fps average, 32,602 draws, 3,640 passes, 1.5 GB uploads.
+- the skinned 3D Inkling, clothing swatches and UI text all render correctly; the only
+  visual oddity is the dark environment (intro lighting), not missing geometry.
+- memory: RSS 10.6 GB, swap 6.6 GB, command shadows 113 GB cumulative -> the known
+  Splat2 renderer leak is present here too; needs bounding before long sessions.
+- 186 draws skipped on "program not built" (shader compile budget), 0 pipeline errors.
