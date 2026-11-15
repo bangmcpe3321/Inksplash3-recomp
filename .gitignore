@@ -1,0 +1,12 @@
+gen/
+build*/
+obj/
+data/
+logs/
+userdata/
+deps/
+syslib/
+toolchain/
+*.o
+*.a
+*.log
