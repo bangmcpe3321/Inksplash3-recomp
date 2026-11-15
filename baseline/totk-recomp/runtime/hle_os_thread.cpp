@@ -101,14 +101,25 @@ static std::atomic<int> g_tls_next{0};
 static u64 g_tls_dtor[kTlsSlots];
 static thread_local u64 t_tls[kTlsSlots];
 
+// Fill the guest-visible nn::os::ThreadType fields the SDK's accessors read (SDK 20.5.22 layout,
+// verified against sdk 0x71801418d0 SetupThreadObjectUnsafe): +0x40 state (3 = running), +0x41 alias,
+// +0x44 s16 priority, +0x48 saved stack base, +0x50 live stack base, +0x58 stack size, +0x1a0 name ptr.
+static void tt_fields(u64 tt, u64 base, u64 size, int prio) {
+    if (!tt) return;
+    *(u8*)(tt + 0x40) = 3; *(u8*)(tt + 0x41) = 0;
+    *(s16*)(tt + 0x44) = (s16)prio;
+    *(u64*)(tt + 0x48) = base; *(u64*)(tt + 0x50) = base; *(u64*)(tt + 0x58) = size;
+}
+
 void os_register_main_thread(Ctx* c, u64 stack_lo, u64 stack_size) {
     u64 tt = (u64)_aligned_malloc(0x200, 16); memset((void*)tt, 0, 0x200);   // guest-visible nn::os::ThreadType
     HThread* t = g_threads.get(tt);
     t->type = tt; t->stack = stack_lo; t->stack_size = stack_size; t->prio = 28; t->name = "MainThread";
-    // sead::MemUtil::isStack reads the stack base from the guest nn::os::ThreadType at +0x50 (the SDK's
-    // CreateThread records it there). Without it sead sees the region [0, size), thinks no name/pointer is
-    // on a stack, and Lp::UI::Impl::Name::init shares a caller's stack string instead of copying it.
-    *(u64*)(tt + 0x50) = stack_lo;
+    // nn::os::ThreadType (SDK 20: size 0x1C0). sead::MemUtil::isStack asks GetCurrentStackInfo, and the
+    // SDK's GetThreadStackInfo reads the live stack base at +0x50 and the size at +0x58; state +0x40 must be
+    // 3 for that call to succeed. Without these sead sees [0, size) and Lp::UI::Impl::Name::init shares a
+    // caller's stack string instead of copying it (the Splatoon 2 blocker).
+    tt_fields(tt, stack_lo, stack_size, 28);
     t->h = GetCurrentThread(); t->tid = GetCurrentThreadId();
     t_self = t;
     (void)c;
@@ -139,7 +150,7 @@ static DWORD WINAPI thread_entry(LPVOID p) {
 HLE_AS(os_CreateThread, "_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi") {
     HThread* t = g_threads.reset(c->x[0]);
     t->type = c->x[0]; t->fn = c->x[1]; t->arg = c->x[2]; t->stack = c->x[3]; t->stack_size = c->x[4]; t->prio = (int)c->x[5];
-    if (c->x[0]) *(u64*)(c->x[0] + 0x50) = c->x[3];   // sead::MemUtil::isStack reads the stack base here
+    tt_fields(c->x[0], c->x[3], c->x[4], (int)c->x[5]);   // stack base/size + state for GetThreadStackInfo
     printf("[os] CreateThread %llx fn=%llx stack=%llx+%llx prio=%d\n", t->type, t->fn, t->stack, t->stack_size, t->prio);
     c->x[0] = 0;
 }
@@ -148,7 +159,7 @@ HLE_AS(os_CreateThread, "_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_m
 HLE_AS(os_CreateThread7, "_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mii") {
     HThread* t = g_threads.reset(c->x[0]);
     t->type = c->x[0]; t->fn = c->x[1]; t->arg = c->x[2]; t->stack = c->x[3]; t->stack_size = c->x[4]; t->prio = (int)c->x[5];
-    if (c->x[0]) *(u64*)(c->x[0] + 0x50) = c->x[3];   // sead::MemUtil::isStack reads the stack base here
+    tt_fields(c->x[0], c->x[3], c->x[4], (int)c->x[5]);
     printf("[os] CreateThread %llx fn=%llx stack=%llx+%llx prio=%d core=%d\n", t->type, t->fn, t->stack, t->stack_size,
            t->prio, (int)c->x[6]);
     c->x[0] = 0;
@@ -178,7 +189,12 @@ HLE_AS(os_SetThreadName, "_ZN2nn2os13SetThreadNameEPNS0_10ThreadTypeEPKc") {
 // SDK 5+ spelling of the same call (Splatoon 2's audio client uses it); the name pointer is stored, not copied.
 HLE_AS(os_SetThreadNamePointer, "_ZN2nn2os20SetThreadNamePointerEPNS0_10ThreadTypeEPKc") {
     HThread* t = g_threads.get(c->x[0]); t->name = c->x[1] ? (const char*)c->x[1] : "";
+    if (c->x[0]) { *(u64*)(c->x[0] + 0x1a0) = c->x[1]; if (c->x[1])
+        for (int i = 0; i < 31 && ((const char*)c->x[1])[i]; i++) *(char*)(c->x[0] + 0x180 + i) = ((const char*)c->x[1])[i]; }
 }
+// The guest nn::os::ThreadType of the calling guest thread: the SDK publishes it in the ThreadLocalRegion
+// at +0x1F8 (rt_tpidrro in rt_main.cpp).
+extern "C" u64 os_current_thread_type(void) { return t_self ? t_self->type : 0; }
 HLE_AS(os_GetCurrentThread, "_ZN2nn2os16GetCurrentThreadEv") { c->x[0] = t_self ? t_self->type : 0; }
 HLE_AS(os_GetThreadId, "_ZN2nn2os11GetThreadIdEPKNS0_10ThreadTypeE") {
     HThread* t = g_threads.get(c->x[0]); c->x[0] = t->tid;

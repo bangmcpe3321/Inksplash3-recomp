@@ -257,7 +257,12 @@ void rt_trace(Ctx* c, u64 fn, int ret) {
 }
 // TPIDRRO_EL0 for lifted sdk code: Horizon's per-thread 0x200-byte ThreadLocalRegion (sdk keeps its thread pointer
 // at +0x1F0). One per host thread (guest threads are host threads).
-u64 rt_tpidrro(Ctx*) { alignas(16) static thread_local u8 tlr[0x200]; return (u64)tlr; }
+extern "C" u64 os_current_thread_type(void);
+u64 rt_tpidrro(Ctx*) {
+    alignas(16) static thread_local u8 tlr[0x200];
+    *(u64*)(tlr + 0x1F8) = os_current_thread_type();   // sdk reads the current ThreadType* here
+    return (u64)tlr;
+}
 // sdk PLT slot with nothing to bind (no HLE, no main export, no lifted definition)
 // The name comes from the caller's `bl <plt stub>` (lr - 4) -> stub's adrp/ldr GOT slot -> JMPREL symbol.
 static void sdk_imp_missing(Ctx* c) {

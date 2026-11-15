@@ -561,16 +561,17 @@ void output_thread() {
 // AudioRendererParameter: sampleRate +0, sampleCount +4, mixBufferCount +8, subMixCount +c, voiceCount +10, sinkCount +14,
 // effectCount +18, performanceFrameCount +1c, isVoiceDropEnabled +20, splitterCount +24, splitterSendChannelCount +28,
 // renderingDevice +2c, executionMode +30, _magic +34
-// InitializeAudioRendererParameter / IsValidAudioRendererParameter: Splatoon 2 uses the SDK 3.x layout, which differs
-// from the 5.x one the rest of this file's callers use. Recovered from the sdk bodies (0x1593b4 / 0x1592c4):
+// InitializeAudioRendererParameter / IsValidAudioRendererParameter: SDK 3.x layout (Splat2). The SDK 20 body
+// (sdk 0x7180218830 / 0x7180218730) keeps the same field semantics and grows the struct to 0x38, adding the
+// two +0x2c/+0x30 equality fields and +0x34 = nn::audio::common::GetCurrentRevision() (0x3F564552, sdk 0x2281b0).
 //   +0x00 sampleRate (48000 or 32000), +0x04 sampleCount (= rate/200), +0x08 >=1, +0x0c in [0,0x100],
 //   +0x10 in [1,0x400], +0x14 >=1, +0x18 in [0,0x100], +0x30 revision info.
 // The real IsValid also compares +0x30 against the driver's live revision; that is a console-driver detail, so it is
 // left out here. The rest of the validation is reproduced exactly.
 HLE_AS(audio_InitializeAudioRendererParameter3, "_ZN2nn5audio32InitializeAudioRendererParameterEPNS0_22AudioRendererParameterE") {
-    memset((void*)c->x[0], 0, 0x34);
+    memset((void*)c->x[0], 0, 0x38);
     u32* p = (u32*)c->x[0];
-    p[0] = 48000; p[1] = 240; p[2] = 1; p[4] = 1; p[5] = 1;
+    p[0] = 48000; p[1] = 240; p[2] = 1; p[4] = 1; p[5] = 1; p[13] = 0x3F564552u;   // GetCurrentRevision()
     c->x[0] = 0;
 }
 HLE_AS(audio_IsValidAudioRendererParameter3, "_ZN2nn5audio29IsValidAudioRendererParameterERKNS0_22AudioRendererParameterE") {
@@ -580,7 +581,9 @@ HLE_AS(audio_IsValidAudioRendererParameter3, "_ZN2nn5audio29IsValidAudioRenderer
               && (s32)p[3] >= 0 && p[3] < 0x101
               && (s32)p[4] >= 1 && p[4] < 0x401
               && (s32)p[5] >= 1 && p[5] < 0x101
-              && (s32)p[6] >= 0 && p[6] < 0x101;
+              && (s32)p[6] >= 0 && p[6] < 0x101
+              && (p[11] == p[12])                       // SDK 20: both 1 or both 0
+              && p[13] == 0x3F564552u;                  // live revision
     c->x[0] = ok;
 }
 HLE_AS(audio_GetAudioRendererWorkBufferSize, "_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE") { c->x[0] = 0x10000; }
