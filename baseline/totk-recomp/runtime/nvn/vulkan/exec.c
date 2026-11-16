@@ -5618,6 +5618,32 @@ void vk_exec_reset(void) {
     st_defaults();
 }
 
+
+// 1x1 depth target cleared to 1.0, for compare samplers that ask for ALWAYS on a non-depth texture. Sampling a
+// colour format with depth comparison is undefined (VALIDATION VUID-vkCmdDrawIndexed-None-06479); with ALWAYS the
+// defined result is 1.0 anyway, and a depth view makes the comparison well-defined.
+static VkImageView depth_one_view(void) {
+    static VkImageView v;
+    if (v) return v;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = VK_FORMAT_D32_SFLOAT, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage img; VmaAllocation mem;
+    VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &img, &mem, NULL));
+    VkCommandBuffer cb = vk_cmd();
+    vk_image_init_layout(cb, img, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkImageSubresourceRange r = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkClearDepthStencilValue cv = {1.0f, 0};
+    vkCmdClearDepthStencilImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &r);
+    VkImageViewCreateInfo vci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
+                                 .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_D32_SFLOAT,
+                                 .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1}};
+    VK_CHECK(vkCreateImageView(g_vk.dev, &vci, NULL, &v));
+    return v;
+}
+
 static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2]) {
     ShaderTexture *st_ = &si->tex[i];
     int slot = ((int)st_->handle_offset - 0x20) / 8;  // 64-bit handles from offset 0x20
@@ -5625,11 +5651,13 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     VkImageView view = VK_NULL_HANDLE;
     VkSampler smp = VK_NULL_HANDLE;
     uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
+    NvnTexture *ltex = NULL; NvnSamplerDesc *lsd = NULL;   // (compare-on-non-depth fix below)
     sc[0] = sc[1] = 1;
     wh[0] = wh[1] = 0;
     if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
         NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
         NvnTexture *tex = e->tex;  // read once (finalize clears entries; nvn.h backend_exec_lock)
+        ltex = tex;
         if (tex) {
             // Per-frame memo: ~2400 lookups per overworld frame recomputed the view (format / range math, cache
             // probe). The first lookup of a frame still runs vk_view (upload check); a view that may have been
@@ -5659,7 +5687,14 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             if (pk_subst_tex && tex == pk_subst_tex && st_->type == TEXTYPE_2D) view = pk_subst_view;   // (pause capture)
         }
     }
-    if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
+    if (h && st.spool && tsc < (uint32_t)st.spool->count) {
+        lsd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
+        smp = vk_sampler(lsd);
+    }
+    // compare ALWAYS on a non-depth texture: use the defined 1.0 depth result (see depth_one_view)
+    if (lsd && lsd->compare_mode && lsd->compare_func == 8 && ltex && ltex->backend &&
+        !(((TexBackend *)ltex->backend)->aspect & VK_IMAGE_ASPECT_DEPTH_BIT))
+        view = depth_one_view();
     if (!view) view = vk_dummy_view(st_->type);
     if (!smp) smp = vk_default_sampler(true);
     *out = (VkDescriptorImageInfo){smp, view, VK_IMAGE_LAYOUT_GENERAL};
