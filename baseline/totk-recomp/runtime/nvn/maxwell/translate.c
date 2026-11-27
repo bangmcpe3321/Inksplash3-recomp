@@ -2167,6 +2167,15 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         char t2[160];
         sprintf(t2, "(%uu + ((%s%s) << %du))", (uint32_t)imm, bits(w, 45, 1) ? "0u - " : "", R(a), scale);
         set_reg(c, d, t2);
+    } else if (c->glsl && OPM(0x5bd8000000000000ull, 0xfff8000000000000ull)) {
+        // Maxwell LEA.HI register form: base is R20, the packed 64-bit offset is
+        // {R39, R08}, and the shifted low word is added to the base.
+        int scale = (int)bits(w, 28, 5), hi = (int)bits(w, 39, 8);
+        if (bits(w, 38, 1) || bits(w, 47, 1) || bits(w, 48, 3) != 7) { fail(c, "lea hi reg with x/cc/pred"); return; }
+        char t2[400];
+        sprintf(t2, "(%s + uint((%s(ulong(%s) << 32 | ulong(%s))) >> %du))", R((int)bits(w, 20, 8)),
+                bits(w, 37, 1) ? "0ul - " : "", R(hi), R(a), 32 - scale);
+        set_reg(c, d, t2);
     } else if (c->glsl && OPM(0x1800000000000000ull, 0xfc00000000000000ull)) {
         // TotK: LEA (hi, cbuf): Rd = c[idx][off] + low32(pack64(Ra, R39) (negated if bit 56) >> (32 - scale 51-55))
         int scale = (int)bits(w, 51, 5), hi = (int)bits(w, 39, 8);

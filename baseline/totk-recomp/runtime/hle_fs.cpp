@@ -18,31 +18,23 @@
 #endif
 
 namespace fsys = std::filesystem;
-#ifdef _WIN32
-static const char* kRomDir  = "C:/totk/extract/romfs";
-// TOTK_USERDATA=<dir>: saves/cache elsewhere (test runs that start a New Game must not touch the player's saves)
-static const char* kUserDir = getenv("TOTK_USERDATA") ? getenv("TOTK_USERDATA") : "C:/totk/userdata";
-static const std::string kOverlayDir = "C:/totk/overlay/romfs";   // tools/rstb_slack.py writes here (U9)
-// Skip the opening (user 2026-10-15): while on, overlay/skip_opening/romfs (tools/make_skip_opening.py: the opening's
-// event flow jumps straight to its own end-of-prologue chain -> Great Sky Island wake-up) is served before the romfs.
-// TOTK_SKIP_OPENING=1 starts with it on; F2 / the pad's Minus toggles it on the title screen (hle_hid.cpp).
-static const std::string kSkipDir = getenv("TOTK_SKIP_DIR") ? getenv("TOTK_SKIP_DIR") : "C:/totk/overlay/skip_opening/romfs";
-#else
-// Linux: no drive letters. TOTK_ROMFS = the extracted romfs (default <exe dir>/data/romfs), TOTK_USERDATA = saves / cache
-// (default $XDG_DATA_HOME/totk-recomp/userdata), TOTK_OVERLAY = LayeredFS-style replacement files (default <exe dir>/data/overlay/romfs,
-// normally absent), TOTK_SKIP_DIR = the skip-opening overlay (default <exe dir>/data/overlay/skip_opening/romfs). See README in the package.
+// Explicit environment paths work on both platforms. Never default a Windows
+// Splatoon build to another game's ROMs, overlays, or player saves in C:/totk.
 static std::string env_or(const char* name, const std::string& def) { const char* e = getenv(name); return e && *e ? e : def; }
 static std::string data_home() {
+#ifdef _WIN32
+    return rt_exe_dir();
+#else
     const char* x = getenv("XDG_DATA_HOME"); const char* h = getenv("HOME");
     return (x && *x ? std::string(x) : std::string(h && *h ? h : ".") + "/.local/share") + "/totk-recomp";
+#endif
 }
-static const std::string kRomStr  = env_or("TOTK_ROMFS", std::string(rt_posix_exe_dir()) + "/data/romfs");
+static const std::string kRomStr  = env_or("TOTK_ROMFS", std::string(rt_exe_dir()) + "/data/romfs");
 static const std::string kUserStr = env_or("TOTK_USERDATA", data_home() + "/userdata");
 static const char* kRomDir  = kRomStr.c_str();
 static const char* kUserDir = kUserStr.c_str();
-static const std::string kOverlayDir = env_or("TOTK_OVERLAY", std::string(rt_posix_exe_dir()) + "/data/overlay/romfs");
-static const std::string kSkipDir = env_or("TOTK_SKIP_DIR", std::string(rt_posix_exe_dir()) + "/data/overlay/skip_opening/romfs");
-#endif
+static const std::string kOverlayDir = env_or("TOTK_OVERLAY", std::string(rt_exe_dir()) + "/data/overlay/romfs");
+static const std::string kSkipDir = env_or("TOTK_SKIP_DIR", std::string(rt_exe_dir()) + "/data/overlay/skip_opening/romfs");
 extern "C" { volatile int g_skip_opening = 0, g_title_phase = 1, g_in_opening = 0; volatile uint64_t g_in_opening_since = 0; }
 static const int skip_init = (g_skip_opening = getenv("TOTK_SKIP_OPENING") && atoi(getenv("TOTK_SKIP_OPENING")) ? 1 : 0);
 extern "C" uint64_t nvn_present_count(void);
@@ -270,11 +262,15 @@ static void count_read(u64 n) {
 extern "C" unsigned long long hle_fs_read_bytes(void) { return g_rd_bytes.load(std::memory_order_relaxed); }   // ([hitch] log)
 static u64 host_pread(HFile* f, s64 off, void* buf, u64 size) {
     u64 done = 0;
+#ifdef _WIN32
+    DWORD winerr = ERROR_SUCCESS;
+#endif
     while (done < size) {
 #ifdef _WIN32
         OVERLAPPED ov{}; u64 o = (u64)off + done; ov.Offset = (DWORD)o; ov.OffsetHigh = (DWORD)(o >> 32);
         DWORD n = 0, want = (DWORD)std::min<u64>(size - done, 1u << 30);
-        if (!ReadFile(f->h, (u8*)buf + done, want, &n, &ov) || n == 0) break;
+        if (!ReadFile(f->h, (u8*)buf + done, want, &n, &ov)) { winerr = GetLastError(); break; }
+        if (n == 0) break;
         done += n;
 #else
         size_t want = (size_t)std::min<u64>(size - done, 1u << 30);
@@ -285,6 +281,12 @@ static u64 host_pread(HFile* f, s64 off, void* buf, u64 size) {
         done += (u64)n;
 #endif
     }
+#ifdef _WIN32
+    if (g_trace_fs) {
+        printf("[fs] ReadFile %s off=%lld requested=%llu read=%llu winerr=%lu\n", f->path.c_str(),
+               (long long)off, (unsigned long long)size, (unsigned long long)done, (unsigned long)winerr);
+    }
+#endif
     count_read(done);
     return done;
 }

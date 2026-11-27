@@ -89,3 +89,48 @@ which is the analogue of Splat2's "title 2D UI at 720p60" milestone.
 - memory: RSS 10.6 GB, swap 6.6 GB, command shadows 113 GB cumulative -> the known
   Splat2 renderer leak is present here too; needs bounding before long sessions.
 - 186 draws skipped on "program not built" (shader compile budget), 0 pipeline errors.
+
+## Native Windows port (local v11.2.0 test)
+
+- Native x64 null and Vulkan executables both build with Visual Studio Clang; the Vulkan build
+  includes the Win32 surface shim. The current 13-test Windows build/runner/shader/HID suite passes.
+- The v11.2.0 lift has 272,489 main functions / 43.40 M instructions and 32,676 SDK functions /
+  1.62 M instructions; the reports list 817 main and 3,728 SDK unhandled instructions.
+- The local NCA extractor had the patch/base order reversed. It now opens the base NCA with
+  `baseNca.OpenFileSystemWithPatch(updateNca, ...)`. The corrected v11.2.0 merge contains 22,837
+  files / 10,056,599,109 B / 126 directories and includes
+  `System/HeapSize/Product.Nin_NX_NVN.HeapDef.byml.zs` (Malloc 34,816 KiB). The incomplete merge
+  had only 7,199 files and fell back to a 32 MiB Malloc heap, below the game's 34 MiB minimum.
+- With matching v11.2.0 ExeFS and corrected RomFS, the native null run lasted 60 s, reached
+  PlayerMake and recorded 1,882 presents. The Vulkan windowed run reached PlayerMake and recorded
+  over 2,100 presents in 60 s, settling near 60 FPS after shader compilation. Both smoke tests
+  were intentionally terminated by the runner timeout; neither hit the earlier heap abort.
+- The Maxwell GLSL translator now supports the LEA.HI register form that caused earlier fragment
+  shader translation failures. In a new 60 s Vulkan run, no unknown-instruction shader failures
+  appeared; steady frame samples showed 0 skipped draws (430 draws were skipped during warmup
+  before their programs were ready), at about 60 FPS. The Vulkan backend now records precise
+  samples-passed queries for NVN ResetCounter/ReportCounter rather than fabricated counts. A 45 s
+  validation completed 39,041 reports, including zero and nonzero results, without Vulkan validation
+  errors; a committed-heap range check keeps result publication fast. PlayerMake captures at frames
+  1800/2100/2400 show readable text and no purple floor pool beneath the avatar. Consecutive-frame
+  captures at 1861-1876 had no measured translation in the stationary HUD/world regions, unlike the
+  pre-fix reference sequence. The user confirmed the avatar is no longer stuck in ink, but reported
+  darker shadows. Wall-paint appearance and gyro aiming still need verification; the subsequent
+  newest-first 17-sample HID history correction has compiled but has not been gameplay-tested.
+- This is not the v11.3.0 Linux test above and does not establish complete gameplay compatibility.
+  The lift still reports unhandled instructions/imports; logs, lifted code, and game data remain
+  outside the repository.
+
+## Native Windows v12.0.0 update
+
+- Verified patch title `0100C2500FC20800`, version `2818048`, and merged it with the matching base
+  in a separate external work tree. RomFS: 22,865 files / 10,060,103,983 B / 126 directories.
+- Regenerated both modules: main 272,586 functions / 43,413,637 instructions / 617 TUs; SDK 32,690
+  functions / 1,616,719 instructions / 27 TUs. Unhandled instruction counts remain 817 and 3,728.
+- Native Vulkan build succeeded: 648 generated objects plus 33 runtime objects, producing a
+  PE32+ AMD64 executable. All 13 Windows build/runner/shader/HID-calibration tests pass.
+- At the user's request, the v12 executable was launched interactively and reached PlayerMake; the
+  session exited normally after 105.5 seconds and logged about 60 FPS after warm-up. A later 86.3 s
+  run loaded Pro Controller factory IMU calibration and delivered batches of 16 live six-axis samples.
+  The user reported gyro response was better; residual drift is not confirmed eliminated. These
+  smoke runs do not establish full v12 gameplay compatibility; v11.2 results above do not carry over.

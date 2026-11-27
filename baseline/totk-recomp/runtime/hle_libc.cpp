@@ -54,6 +54,9 @@ HLE(__cxa_guard_release) { *(volatile u8*)c->x[0] = 1; g_guard_mtx.unlock(); }
 HLE(__cxa_pure_virtual) { rt_trap(c, c->x[30], "__cxa_pure_virtual"); }
 HLE(__cxa_deleted_virtual) { rt_trap(c, c->x[30], "__cxa_deleted_virtual"); }
 HLE(abort) { rt_trap(c, c->x[30], "guest abort()"); }
+HLE_AS(nnDiagAbortImpl, "_ZN2nn4diag6detail9AbortImplEv") {
+    rt_trap(c, c->x[30], "nn::diag::detail::AbortImpl (guest fatal abort)");
+}
 HLE(exit)  { fprintf(stderr, "[rt] guest exit(%d)\n", (int)c->x[0]); fflush(stdout); fflush(stderr); _Exit((int)c->x[0]); }
 static thread_local int t_errno;
 HLE(__errno_location) { c->x[0] = (u64)&t_errno; }

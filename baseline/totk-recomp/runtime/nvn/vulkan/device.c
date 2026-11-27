@@ -344,6 +344,9 @@ static void create_device(void) {
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     b->shaderClipDistance = h->shaderClipDistance;
+    b->occlusionQueryPrecise = h->occlusionQueryPrecise;
+    g_vk.occlusion_precise = h->occlusionQueryPrecise;
+    LOG("[vk] precise occlusion queries: %s\n", g_vk.occlusion_precise ? "supported" : "unsupported");
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     if (!h->shaderFloat64) LOG("[vk] warning: no shaderFloat64 (double-precision 'material' vertex shaders will not build)\n");
     float prio = 1.0f;

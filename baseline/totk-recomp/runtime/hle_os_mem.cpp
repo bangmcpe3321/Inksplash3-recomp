@@ -25,6 +25,16 @@ u64 g_rt_heap_base;
 extern "C" u64 kernel_heap_size(void) { return g_heap_used; }   // committed bytes from g_rt_heap_base
 static std::mutex g_heap_mtx;
 
+// The guest heap is one contiguous VirtualAlloc reservation; AllocateMemoryBlock
+// commits a monotonic prefix and FreeMemoryPages never decommits this range.
+// This avoids a VirtualQuery walk through the fragmented heap for frequent GPU
+// counter result writes. Non-heap pointers still use rt_readable_c's OS check.
+extern "C" bool rt_main_heap_range_readable_c(u64 address, u64 size) {
+    if (!address || !size || size > ~address) return false;
+    std::lock_guard<std::mutex> lock(g_heap_mtx);
+    return g_heap_base && address >= g_heap_base && address + size <= g_heap_base + g_heap_used;
+}
+
 // nn::os::MemoryInfo. The layout is the sdk's own DebugImplByHorizon::QueryMemoryInfo (sdk 0x85154 on Splatoon 2's build):
 //   +0x00 total physical (svcGetInfo 6),  +0x08 total used (svcGetInfo 7),
 //   +0x10 heap size, +0x18 heap used, +0x20 heap free, +0x28 heap reserved/peak, +0x30 u32.

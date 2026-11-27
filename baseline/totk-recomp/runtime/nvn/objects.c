@@ -10,6 +10,12 @@ void renderer_sync(void);
 
 static uint64_t next_debug_id = 1;
 
+static void trace_present_interval(const char *where, uint32_t interval) {
+    if (!ENV("TOTK_TRACE_PRESENT_INTERVAL")) return;
+    static unsigned n;
+    if (n++ < 40) LOG("[nvn] present interval %s: %u\n", where, interval);
+}
+
 // ================================================================== device
 // NVNdeviceInfo -> value
 static uint32_t device_integer(uint32_t which) {
@@ -954,7 +960,11 @@ NVN(nvnWindowBuilderSetDevice) { G(uint64_t, A(0), 0) = A(1); }
 NVN(nvnWindowBuilderSetDefaults) { memset(AP(0) + 8, 0, 0x20); G(uint32_t, A(0), 0x20) = 1; }
 NVN(nvnWindowBuilderSetNativeWindow) { G(uint64_t, A(0), 8) = A(1); }
 NVN(nvnWindowBuilderSetTextures) { G(uint32_t, A(0), 0x10) = (uint32_t)A(1); G(uint64_t, A(0), 0x18) = A(2); }
-NVN(nvnWindowBuilderSetPresentInterval) { G(uint32_t, A(0), 0x20) = (uint32_t)A(1); }
+NVN(nvnWindowBuilderSetPresentInterval) {
+    uint32_t interval = (uint32_t)A(1);
+    trace_present_interval("builder", interval);
+    G(uint32_t, A(0), 0x20) = interval;
+}
 NVN(nvnWindowBuilderSetNumActiveTextures) { G(uint32_t, A(0), 0x24) = (uint32_t)A(1); }
 NVN(nvnWindowBuilderGetDevice) { RET(G(uint64_t, A(0), 0)); }
 NVN(nvnWindowBuilderGetNativeWindow) { RET(G(uint64_t, A(0), 8)); }
@@ -972,6 +982,7 @@ NVN(nvnWindowInitialize) {
     if (w->num > 8) w->num = 8;
     memcpy(w->textures, (void *)(uintptr_t)G(uint64_t, A(1), 0x18), w->num * 8);
     w->interval = (int)G(uint32_t, A(1), 0x20);
+    trace_present_interval("initialize", (uint32_t)w->interval);
     w->active = G(uint32_t, A(1), 0x24) ? (int)G(uint32_t, A(1), 0x24) : w->num;
     SET_HOST(A(0), w);
     LOG("[nvn] window with %d textures\n", w->num);
@@ -985,7 +996,10 @@ NVN(nvnWindowGetNumTextures) { RET(WIN->num); }
 NVN(nvnWindowGetNumActiveTextures) { RET(WIN->active); }
 NVN(nvnWindowSetNumActiveTextures) { WIN->active = (int)A(1); }
 NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
-NVN(nvnWindowSetPresentInterval) { WIN->interval = (int)A(1); }
+NVN(nvnWindowSetPresentInterval) {
+    WIN->interval = (int)A(1);
+    trace_present_interval("window", (uint32_t)WIN->interval);
+}
 NVN(nvnWindowSetCrop) {
     int *cr = WIN->crop, n[4] = {(int)A(1), (int)A(2), (int)A(3), (int)A(4)};
     if (memcmp(cr, n, sizeof n)) LOG("[nvn] window crop %d,%d %dx%d\n", n[0], n[1], n[2], n[3]);
@@ -1018,6 +1032,7 @@ NVN(nvnQueuePresentTexture) {
         else backend_present(HOST(NvnTexture, w->textures[i]));
     }
     g_presents++;
+    if (g_presents <= 8) trace_present_interval("present", (uint32_t)w->interval);
     vi_present_pace(w->interval);
     static uint64_t n, n_last; static double t_last;    // frame pacing: one line per ~2 s of wall time
     struct timespec ts; timespec_get(&ts, TIME_UTC);

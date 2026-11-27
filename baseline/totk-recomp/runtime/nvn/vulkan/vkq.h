@@ -51,6 +51,8 @@ void q_vkCmdClearDepthStencilImage(VkCommandBuffer, VkImage, VkImageLayout, cons
                                    const VkImageSubresourceRange *);
 void q_vkCmdClearAttachments(VkCommandBuffer, uint32_t, const VkClearAttachment *, uint32_t, const VkClearRect *);
 void q_vkCmdResetQueryPool(VkCommandBuffer, VkQueryPool, uint32_t, uint32_t);
+void q_vkCmdBeginQuery(VkCommandBuffer, VkQueryPool, uint32_t, VkQueryControlFlags);
+void q_vkCmdEndQuery(VkCommandBuffer, VkQueryPool, uint32_t);
 void q_vkCmdWriteTimestamp2(VkCommandBuffer, VkPipelineStageFlags2, VkQueryPool, uint32_t);
 // vkCmdSetAttachmentFeedbackLoopEnableEXT through its function pointer (queued in order like the rest)
 void q_set_fbl(PFN_vkCmdSetAttachmentFeedbackLoopEnableEXT fn, VkCommandBuffer cb, VkImageAspectFlags m);
@@ -95,4 +97,6 @@ void q_set_fbl(PFN_vkCmdSetAttachmentFeedbackLoopEnableEXT fn, VkCommandBuffer c
 #define vkCmdClearDepthStencilImage(...) q_vkCmdClearDepthStencilImage(__VA_ARGS__)
 #define vkCmdClearAttachments(...) q_vkCmdClearAttachments(__VA_ARGS__)
 #define vkCmdResetQueryPool(...) q_vkCmdResetQueryPool(__VA_ARGS__)
+#define vkCmdBeginQuery(...) q_vkCmdBeginQuery(__VA_ARGS__)
+#define vkCmdEndQuery(...) q_vkCmdEndQuery(__VA_ARGS__)
 #define vkCmdWriteTimestamp2(...) q_vkCmdWriteTimestamp2(__VA_ARGS__)

@@ -1,6 +1,5 @@
-// TotK Linux port: the symbols the runtime takes from the Vulkan backend (totk_hooks.c, exec.c, textures.c, device.c), for the
-// null-backend build (mkninja_linux.py --null: headless smoke tests; no window, no GPU, no shaderc). Linux build only.
-#ifndef _WIN32
+// Symbols the runtime takes from the Vulkan backend, for headless builds on
+// either platform (no window, GPU, or shaderc).
 #include <stdbool.h>
 #include <stdint.h>
 #include "nvn.h"
@@ -28,4 +27,3 @@ bool renderer_texture_gpu_owned(NvnTexture *t) { (void)t; return false; }
 uint64_t renderer_present_count(void) { return 0; }
 void tex_watch_add(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 bool tex_watched(uint64_t addr) { (void)addr; return false; }
-#endif

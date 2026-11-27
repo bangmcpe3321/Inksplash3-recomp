@@ -112,8 +112,8 @@ class Program
                 {
                     using var baseStorage = new LocalStorage(baseNcaPath, FileAccess.Read);
                     var baseNca = new Nca(keySet, baseStorage);
-                    Console.WriteLine($"[romfs] merging with base {System.IO.Path.GetFileName(baseNcaPath)} ...");
-                    var fs = nca.OpenFileSystemWithPatch(baseNca, NcaSectionType.Data, integrity);
+                    Console.WriteLine($"[romfs] merging patch into base {System.IO.Path.GetFileName(baseNcaPath)} ...");
+                    var fs = baseNca.OpenFileSystemWithPatch(nca, NcaSectionType.Data, integrity);
                     LibHac.Tools.FsSystem.FileSystemExtensions.Extract(fs, romfsDir, null);
                     Console.WriteLine("[romfs] done (merged)");
                 }

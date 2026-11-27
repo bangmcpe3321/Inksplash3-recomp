@@ -3,6 +3,7 @@
 // Input = host pads (XInput: Xbox; raw HID: DualSense, DualShock 4, Pro Controller, Joy-Cons) | keyboard (while the game window has focus) |
 // TOTK_PRESS script; see host_input().
 #include "hle.h"
+#include "hid_gyro_cal.h"
 #include <chrono>
 #include <windows.h>
 #ifndef _WIN32
@@ -18,6 +19,8 @@
 #include "linux/plat_posix.h"
 #endif
 #include <atomic>
+#include <algorithm>
+#include <array>
 #include <mutex>
 #include <thread>
 #include <string>
@@ -180,12 +183,15 @@ static void pad_read(HostInput* in);   // SDL gamepad, below the pad state
 //   Buttons by label (Switch layout). Stick centre = first full report (sticks at rest), range grows from 1300 to
 //   what the stick reaches (no SPI factory calibration read).
 enum PadKind { PadNone, PadDualSense, PadDS4, PadPro, PadJoyL, PadJoyR };
+enum : u32 { GyroDriftLoose = 0, GyroDriftStandard = 1, GyroDriftTight = 2 };
 // Motion in the Switch SixAxisSensor frame as Eden/yuzu feed it (x right, y forward, z up out of the face; accel in g,
 // -1 on z lying flat face up; angular velocity in revolutions/s), integrated by the pad thread (motion_fuse).
 struct Motion { float acc[3] = {0, 0, -1}, gyro[3] = {}, angle[3] = {}, dir[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1}; s64 dt_ns = 5000000; u64 n = 0; };
+static constexpr size_t kMotionHistorySize = 17;
 struct HidPad {
     std::atomic<u64> buttons{0}; std::atomic<s32> lx{0}, ly{0}, rx{0}, ry{0}; std::atomic<bool> live{false};
-    std::mutex mmu; Motion m; std::atomic<bool> has_imu{false};
+    std::mutex mmu; Motion m; std::array<Motion, kMotionHistorySize> motion_history{}; size_t motion_head = 0, motion_count = 0;
+    std::atomic<bool> has_imu{false}; std::atomic<u32> gyro_mode{GyroDriftStandard};
     // rumble output: a second handle (synchronous ReadFile on the read handle would hold WriteFile until a report lands)
     std::atomic<HANDLE> wr{INVALID_HANDLE_VALUE}; std::atomic<int> kind{PadNone}; bool bt = false; int outlen = 64; u8 seq = 0;
 };
@@ -240,6 +246,14 @@ static void sony_decode(const u8* r, PadKind kind, bool bt, HidPad* pad) {
 }
 
 struct NinCal { int c[4], r[4]; bool init; };
+static s16 le16(const u8* p);
+using NinImuCal = hid_gyro::ImuCalibration;
+static bool nin_imu_cal_reply(const u8* r, size_t n, NinImuCal* cal) {
+    if (!hid_gyro::parse_spi_reply(r, n, cal)) return false;
+    if (cal->user_offsets) printf("[hid] Nintendo IMU user calibration offsets loaded\n");
+    else printf("[hid] Nintendo IMU factory calibration loaded\n");
+    return true;
+}
 static void nin_decode(const u8* r, PadKind kind, NinCal* k, HidPad* pad) {
     if (r[0] != 0x30 && r[0] != 0x21 && r[0] != 0x31) return;   // full report / subcommand reply / NFC-IR: same header
     int raw[4] = {r[6] | (r[7] & 0xF) << 8, r[7] >> 4 | r[8] << 4, r[9] | (r[10] & 0xF) << 8, r[10] >> 4 | r[11] << 4};
@@ -284,36 +298,33 @@ static void nin_decode(const u8* r, PadKind kind, NinCal* k, HidPad* pad) {
 // (gyro integration + accelerometer tilt correction, Mahony gain 0.5; gyro bias averaged while the pad lies still;
 // 1.3 dps dead zone). TOTK_GYRO=0: no motion (the game sees a pad lying still).
 struct Fusion {
-    float q[4] = {1, 0, 0, 0}, bias[3] = {}; double still_s = 0, steady_s = 0; u64 logged = 0;
-    double win_s = 0, win_still = 0, win_steady = 0, win_out[3] = {}; int win_logs = 0;   // [hid] gyro log window
+    float q[4] = {1, 0, 0, 0}, bias[3] = {}; u64 logged = 0;
+    double win_s = 0, win_rest = 0, win_out[3] = {}; int win_logs = 0;   // [hid] gyro log window
 };
+static float gyro_drift_threshold(u32 mode) {
+    // nn::hid thresholds in rad/s (Eden MotionInput), converted to this path's rev/s units.
+    return hid_gyro::drift_threshold_rev_s(mode);
+}
 static void motion_fuse(HidPad* pad, Fusion* f, const float acc[3], const float gyro_in[3], float dt) {
     if (!(dt > 0 && dt < 0.1f)) dt = 0.005f;
     float an = sqrtf(acc[0] * acc[0] + acc[1] * acc[1] + acc[2] * acc[2]);
     float g[3] = {gyro_in[0] - f->bias[0], gyro_in[1] - f->bias[1], gyro_in[2] - f->bias[2]};
     float gn = sqrtf(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
-    // Gyro bias (user 2026-10-15: "theres a rightward drift on the gyro ... its contant"): the old rule learned it only
-    // while the pad LAY still (< 4 dps, 1 g +- 0.05 for 0.5 s); held in the hands it never did, tremor kept |gyro| over
-    // the dead zone and the residual yaw bias went to the game. Now three rates:
-    //  lying still 0.5 s: 0.02 per sample (as before);
-    //  held steady (< 2 dps for 1 s, 0.9..1.1 g): time constant 5 s (ours);
-    //  not moving fast (< 0.05 rev/s = 18 dps, 0.9..1.1 g): time constant 40 s = Eden motion_input.cpp SetGyroscope
-    //  (gyro_bias * 0.9999 + gyroscope * 0.0001 per sample at ~250 Hz while !IsMoving(IsAtRestRelaxed)).
     bool g1 = an > 0.9f && an < 1.1f;
-    bool still = gn < 0.011f && fabsf(an - 1.0f) < 0.05f;           // < ~4 dps, ~1 g
-    f->still_s = still ? f->still_s + dt : 0;
-    f->steady_s = gn < 0.0055f && g1 ? f->steady_s + dt : 0;
-    float rate = f->still_s > 0.5 ? 0.02f : f->steady_s > 1.0 ? dt / 5.0f : gn < 0.05f && g1 ? dt / 40.0f : 0.0f;
+    const u32 mode = pad->gyro_mode.load(std::memory_order_relaxed);
+    const bool at_rest = gn < hid_gyro::bias_learning_rest_threshold_rev_s() && g1;
+    const float rate = at_rest ? 1.0f - powf(0.9999f, dt / 0.005f) : 0.0f;
     if (rate > 0) for (int i = 0; i < 3; i++) f->bias[i] += (gyro_in[i] - f->bias[i]) * rate;
-    if (gn < 0.0035f) g[0] = g[1] = g[2] = 0;
-    f->win_s += dt; f->win_still += f->still_s > 0.5 ? dt : 0; f->win_steady += f->steady_s > 1.0 ? dt : 0;
+    const float deadzone = gyro_drift_threshold(mode);
+    if (gn < deadzone) g[0] = g[1] = g[2] = 0;
+    f->win_s += dt; f->win_rest += at_rest ? dt : 0;
     for (int i = 0; i < 3; i++) f->win_out[i] += g[i] * dt;
     if (f->win_s >= 30.0) {   // measurement for the next report: bias + what reached the game (mean dps) per 30 s
         if (f->win_logs++ < 60)
-            printf("[hid] gyro 30 s: bias %.2f %.2f %.2f dps, game mean %.2f %.2f %.2f dps, lying still %.0f %%, held steady %.0f %%\n",
+            printf("[hid] gyro 30 s: bias %.2f %.2f %.2f dps, game mean %.2f %.2f %.2f dps, at rest %.0f %%\n",
                    f->bias[0] * 360, f->bias[1] * 360, f->bias[2] * 360, f->win_out[0] / f->win_s * 360, f->win_out[1] / f->win_s * 360,
-                   f->win_out[2] / f->win_s * 360, f->win_still / f->win_s * 100, f->win_steady / f->win_s * 100);
-        f->win_s = f->win_still = f->win_steady = 0; f->win_out[0] = f->win_out[1] = f->win_out[2] = 0;
+                   f->win_out[2] / f->win_s * 360, f->win_rest / f->win_s * 100);
+        f->win_s = f->win_rest = 0; f->win_out[0] = f->win_out[1] = f->win_out[2] = 0;
     }
     float w[3] = {g[0] * 6.2831853f, g[1] * 6.2831853f, g[2] * 6.2831853f};   // rad/s
     float* q = f->q;
@@ -340,12 +351,21 @@ static void motion_fuse(HidPad* pad, Fusion* f, const float acc[3], const float 
     for (int c = 0; c < 3; c++) for (int k = 0; k < 3; k++) m.dir[c * 3 + k] = r[k * 3 + c];
     m.dt_ns = (s64)(dt * 1e9f);
     m.n++;
+    pad->motion_history[pad->motion_head] = m;
+    pad->motion_head = (pad->motion_head + 1) % kMotionHistorySize;
+    if (pad->motion_count < kMotionHistorySize) pad->motion_count++;
     pad->has_imu = true;
     if (f->logged < 3 && m.n % 2000 == 1) {
         f->logged++;
         printf("[hid] motion: accel %.2f %.2f %.2f g, gyro %.3f %.3f %.3f rev/s, bias %.4f %.4f %.4f\n", acc[0], acc[1], acc[2], g[0], g[1],
                g[2], f->bias[0], f->bias[1], f->bias[2]);
     }
+}
+static void reset_motion(HidPad* pad) {
+    std::lock_guard<std::mutex> l(pad->mmu);
+    pad->m = Motion{};
+    pad->motion_history = {};
+    pad->motion_head = pad->motion_count = 0;
 }
 static bool ds_haptics_on() { static const bool on = getenv("TOTK_DS_HAPTICS") && atoi(getenv("TOTK_DS_HAPTICS")) != 0; return on; }
 static bool gyro_on() { static const bool on = !getenv("TOTK_GYRO") || strcmp(getenv("TOTK_GYRO"), "0") != 0; return on; }
@@ -363,12 +383,14 @@ static void ds_imu(const u8* r, bool bt, const DsCal& k, HidPad* pad, Fusion* f,
 }
 // Pro Controller / Joy-Con report 0x30: 3 IMU frames (accel x y z, gyro x y z) at 13 + 12 i, 5 ms apart (w31:
 // 4096 LSB per g, 0.070 dps per LSB; SDL frame (-y, z, -x) for both, then the Eden mapping above).
-static void nin_imu(const u8* r, HidPad* pad, Fusion* f) {
+static void nin_imu(const u8* r, HidPad* pad, Fusion* f, const NinImuCal& cal) {
     if (r[0] != 0x30) return;
     for (int s = 0; s < 3; s++) {
         const u8* p = r + 13 + 12 * s;
-        float a[3] = {le16(p) / 4096.0f, le16(p + 2) / 4096.0f, le16(p + 4) / 4096.0f};
-        float gd[3] = {le16(p + 6) * 0.0700f, le16(p + 8) * 0.0700f, le16(p + 10) * 0.0700f};
+        s16 raw_acc[3], raw_gyro[3];
+        for (int i = 0; i < 3; i++) { raw_acc[i] = le16(p + 2 * i); raw_gyro[i] = le16(p + 6 + 2 * i); }
+        float a[3], gd[3];
+        hid_gyro::convert_raw(raw_acc, raw_gyro, cal, a, gd);
         const float acc[3] = {a[1], -a[0], -a[2]};
         const float gyro[3] = {-gd[1] / 360.0f, gd[0] / 360.0f, gd[2] / 360.0f};
         motion_fuse(pad, f, acc, gyro, 0.005f);
@@ -387,6 +409,12 @@ static bool hid_write(HANDLE h, const u8* d, int n, int outlen) {
 static void nin_subcmd(HANDLE h, int outlen, u8* pkt, u8 cmd, u8 arg) {
     u8 b[12] = {0x01, (u8)((*pkt)++ & 15), 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, cmd, arg};   // neutral rumble
     if (!hid_write(h, b, 12, outlen)) printf("[hid] Nintendo subcommand %02x failed (%lu)\n", cmd, GetLastError());
+    Sleep(60);
+}
+static void nin_spi_read(HANDLE h, int outlen, u8* pkt, u32 address, u8 length) {
+    u8 b[16] = {0x01, (u8)((*pkt)++ & 15), 0x00, 0x01, 0x40, 0x40, 0x00, 0x01, 0x40, 0x40, 0x10,
+                (u8)address, (u8)(address >> 8), (u8)(address >> 16), (u8)(address >> 24), length};
+    if (!hid_write(h, b, sizeof b, outlen)) printf("[hid] Nintendo SPI read %08lx failed (%lu)\n", (unsigned long)address, GetLastError());
     Sleep(60);
 }
 
@@ -439,6 +467,7 @@ static void ds_effects(HidPad* p, HANDLE w, u8 left, u8 right, bool haptics) {
 
 static void hidpad_thread(int slot, std::wstring path, PadKind kind, bool bt, HANDLE h) {
     HidPad* pad = &g_hidpad[slot];
+    NinImuCal imu_cal;
     int outlen = 64, featlen = 0;
     void* pd = nullptr;
     if (hidapi.prep(h, &pd)) {
@@ -449,7 +478,7 @@ static void hidpad_thread(int slot, std::wstring path, PadKind kind, bool bt, HA
     // rumble writes go through their own handle (rumble_thread); motion/rumble state on the pad
     HANDLE w = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     pad->bt = bt; pad->outlen = outlen; pad->seq = 0; pad->has_imu = false;
-    { std::lock_guard<std::mutex> l(pad->mmu); pad->m = Motion{}; }
+    reset_motion(pad);
     if (kind == PadPro || kind == PadJoyL || kind == PadJoyR) {
         if (!bt) {   // USB: handshake, 3 Mbit, handshake, HID only (no timeout) before Bluetooth-style subcommands work
             for (u8 c : {0x02, 0x03, 0x02, 0x04}) { u8 m[2] = {0x80, c}; hid_write(h, m, 2, outlen); Sleep(60); }
@@ -459,6 +488,10 @@ static void hidpad_thread(int slot, std::wstring path, PadKind kind, bool bt, HA
         nin_subcmd(h, outlen, &pkt, 0x30, 0x01);   // player light 1
         nin_subcmd(h, outlen, &pkt, 0x40, 0x01);   // IMU on (w31)
         nin_subcmd(h, outlen, &pkt, 0x48, 0x01);   // vibration on (HD rumble)
+        if (gyro_on()) {
+            nin_spi_read(h, outlen, &pkt, 0x6020, 24); // factory IMU offsets/scales
+            nin_spi_read(h, outlen, &pkt, 0x8026, 20); // optional user offsets (B2 A1 magic)
+        }
         pad->seq = pkt;
     }
     DsCal dscal;
@@ -481,13 +514,16 @@ static void hidpad_thread(int slot, std::wstring path, PadKind kind, bool bt, HA
     auto rate_t0 = std::chrono::steady_clock::now();
     while (ReadFile(h, rep, sizeof rep, &n, nullptr) && n > 0) {
         if (kind == PadDualSense || kind == PadDS4) sony_decode(rep, kind, bt, pad);
-        else nin_decode(rep, kind, &cal, pad);
+        else {
+            nin_decode(rep, kind, &cal, pad);
+            if (kind == PadPro || kind == PadJoyL || kind == PadJoyR) nin_imu_cal_reply(rep, n, &imu_cal);
+        }
         if (gyro_on()) {
             if (kind == PadDualSense && ((bt && rep[0] == 0x31) || (!bt && rep[0] == 0x01 && n >= 64))) {
                 auto t = std::chrono::steady_clock::now();
                 ds_imu(rep, bt, dscal, pad, &fus, std::chrono::duration<double>(t - imu_t).count());
                 imu_t = t;
-            } else if (kind == PadPro || kind == PadJoyL || kind == PadJoyR) nin_imu(rep, pad, &fus);
+            } else if (kind == PadPro || kind == PadJoyL || kind == PadJoyR) nin_imu(rep, pad, &fus, imu_cal);
         }
         // report rate (input latency, user 2026-10-15): one line per 10 s for the first minute
         rate_n++;
@@ -604,7 +640,7 @@ static void gp_open_first() {   // g_gp_mu held; called at most once a second wh
         if (gyr) SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_GYRO, true);
         SDL_PropertiesID pr = SDL_GetGamepadProperties(g);
         g_gp_rumble = SDL_GetBooleanProperty(pr, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
-        { std::lock_guard<std::mutex> l(pad->mmu); pad->m = Motion{}; }
+        reset_motion(pad);
         g_gp_fus = Fusion{}; g_gp_gyro_ts = 0;
         g_gp_has_gyro = gyr;
         pad->has_imu = false; pad->live = true; pad->kind = PadPro;
@@ -1190,6 +1226,29 @@ HLE_AS(hid_GetVibrationDeviceHandles, "_ZN2nn3hid25GetVibrationDeviceHandlesEPNS
     c->x[0] = (u64)n;
 }
 HLE_AS(hid_StartSixAxisSensor, "_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE") { }
+// Nintendo's SDK reads the current mode, then raises it to Tight during controller setup.
+// Keep it per sensor handle; the host fusion path supplies the actual motion data.
+static std::mutex g_gyro_drift_mode_mu;
+static std::unordered_map<u32, u32> g_gyro_drift_modes;
+static u32 gyro_drift_mode(u32 handle) {
+    std::lock_guard<std::mutex> lock(g_gyro_drift_mode_mu);
+    const auto it = g_gyro_drift_modes.find(handle);
+    return it == g_gyro_drift_modes.end() ? GyroDriftStandard : it->second;
+}
+HLE_AS(hid_GetGyroscopeZeroDriftMode, "_ZN2nn3hid25GetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleE") {
+    const u32 handle = *(const u32*)c->x[0];
+    c->x[0] = gyro_drift_mode(handle);
+}
+HLE_AS(hid_SetGyroscopeZeroDriftMode,
+       "_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE") {
+    const u32 handle = *(const u32*)c->x[0];
+    const u32 mode = *(const u32*)c->x[1];
+    if (mode <= GyroDriftTight) {
+        std::lock_guard<std::mutex> lock(g_gyro_drift_mode_mu);
+        g_gyro_drift_modes[handle] = mode;
+    }
+    c->x[0] = 0; // nn::Result success; invalid enum values are ignored by the host sensor shim.
+}
 HLE_AS(hid_InitializeVibrationDevice, "_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE") { }
 // ---- rumble (user 2026-10-15: "rumble support for xbox dualsense and pro, with hd rumble on dual and pro")
 // The game drives nn::hid's vibration node graph: VibrationPlayer (.bnvib clips), VibrationWriter (direct values),
@@ -1621,22 +1680,48 @@ static HidPad* imu_pad(u32 handle) {
 }
 HLE_AS(hid_GetSixAxisSensorStates, "_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE") {
     SixAxisState* s = (SixAxisState*)c->x[0]; s32 n = (s32)c->x[1];
-    HidPad* p = imu_pad(*(u32*)c->x[2]);
-    s32 k = n > 0 ? 1 : 0;
-    for (s32 i = 0; i < k; i++) {
-        memset(&s[i], 0, sizeof s[i]);
-        s[i].sampling_number = g_sample++; s[i].delta_time = 5000000;   // 5 ms
-        s[i].acc[2] = -1.0f; s[i].dir[0] = s[i].dir[4] = s[i].dir[8] = 1.0f;
-        if (p) {
-            std::lock_guard<std::mutex> l(p->mmu);
-            const Motion& m = p->m;
+    const u32 handle = *(u32*)c->x[2];
+    HidPad* p = imu_pad(handle);
+    if (p) p->gyro_mode.store(gyro_drift_mode(handle), std::memory_order_relaxed);
+    s32 k = 0;
+    u64 source_sample = 0;
+    int source_kind = PadNone;
+    if (n > 0 && p) {
+        std::lock_guard<std::mutex> l(p->mmu);
+        k = (s32)std::min<size_t>((size_t)n, p->motion_count);
+        source_sample = p->m.n;
+        source_kind = p->kind.load();
+        // The SDK exposes the shared six-axis LIFO newest-first, up to its 17-entry capacity.
+        for (s32 i = 0; i < k; i++) {
+            const size_t index = (p->motion_head + kMotionHistorySize - 1 - (size_t)i) % kMotionHistorySize;
+            const Motion& m = p->motion_history[index];
+            memset(&s[i], 0, sizeof s[i]);
+            s[i].sampling_number = (s64)m.n;
             s[i].delta_time = m.dt_ns;
             memcpy(s[i].acc, m.acc, sizeof m.acc); memcpy(s[i].gyro, m.gyro, sizeof m.gyro);
             memcpy(s[i].angle, m.angle, sizeof m.angle); memcpy(s[i].dir, m.dir, sizeof m.dir);
+            s[i].attributes = 1; // IsConnected
         }
-        s[i].attributes = 1;                                           // IsConnected
+    } else if (n > 0) {
+        // No host IMU: return the same single neutral state the HLE has historically exposed.
+        memset(&s[0], 0, sizeof s[0]);
+        s[0].sampling_number = g_sample++;
+        s[0].delta_time = 5000000;
+        s[0].acc[2] = -1.0f;
+        s[0].dir[0] = s[0].dir[4] = s[0].dir[8] = 1.0f;
+        s[0].attributes = 1;
+        k = 1;
     }
     c->x[0] = (u64)k;
+    if (k && getenv("TOTK_GYRO_TRACE")) {
+        static std::atomic<u64> trace_calls{0};
+        const u64 call = trace_calls.fetch_add(1, std::memory_order_relaxed);
+        if (call < 16 || call % 120 == 0) {
+            printf("[hid] SixAxis handle %08x source %d returned %d latest %llu dt %lld ns gyro %.4f %.4f %.4f angle %.4f %.4f %.4f\n",
+                   handle, source_kind, k, (unsigned long long)source_sample, (long long)s[0].delta_time,
+                   s[0].gyro[0], s[0].gyro[1], s[0].gyro[2], s[0].angle[0], s[0].angle[1], s[0].angle[2]);
+        }
+    }
 }
 
 HLE_AS(hid_InitializeMouse, "_ZN2nn3hid15InitializeMouseEv") { }

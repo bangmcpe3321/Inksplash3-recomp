@@ -644,7 +644,7 @@ HLE_AS(audio_RequestUpdateAudioRenderer, "_ZN2nn5audio26RequestUpdateAudioRender
 }
 
 // ------------------------------------------------------------------ voices
-HLE_AS(audio_AcquireVoiceSlot, "_ZN2nn5audio16AcquireVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeEiiNS0_12SampleFormatEiPKvmPKNS3_15BehaviorOptionsE") {
+static void audio_acquire_voice_slot(Ctx* c) {
     std::lock_guard<std::mutex> l(g_mtx);
     Voice& v = g_voices[c->x[1]];
     v = Voice{};
@@ -657,6 +657,12 @@ HLE_AS(audio_AcquireVoiceSlot, "_ZN2nn5audio16AcquireVoiceSlotEPNS0_19AudioRende
     if (logged++ < 8) printf("[audio] AcquireVoiceSlot %llx: %d Hz, %d ch, format %d, priority %d, param %llx+%llu\n", (unsigned long long)c->x[1], v.rate, v.nch, v.fmt, v.prio,
                              (unsigned long long)c->x[6], (unsigned long long)c->x[7]);
     c->x[0] = 1;
+}
+HLE_AS(audio_AcquireVoiceSlot, "_ZN2nn5audio16AcquireVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeEiiNS0_12SampleFormatEiPKvmPKNS3_15BehaviorOptionsE") {
+    audio_acquire_voice_slot(c);
+}
+HLE_AS(audio_AcquireVoiceSlotLegacy, "_ZN2nn5audio16AcquireVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeEiiNS0_12SampleFormatEiPKvm") {
+    audio_acquire_voice_slot(c);
 }
 HLE_AS(audio_ReleaseVoiceSlot, "_ZN2nn5audio16ReleaseVoiceSlotEPNS0_19AudioRendererConfigEPNS0_9VoiceTypeE") {
     std::lock_guard<std::mutex> l(g_mtx);

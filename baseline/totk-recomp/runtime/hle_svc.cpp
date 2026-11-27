@@ -13,9 +13,14 @@
 #include <cstring>
 #include <chrono>
 #include <thread>
-#include <unistd.h>
 #include <fenv.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <process.h>
+#else
+#include <unistd.h>
 #include <sys/syscall.h>
+#endif
 
 extern "C" u64 g_rt_heap_base;
 extern "C" u64 kernel_heap_size(void);
@@ -42,7 +47,11 @@ HLE_AS(svc_GetCurrentProcessorNumber, "_ZN2nn3svc7aarch644lp6425GetCurrentProces
 
 // ---------------------------------------------------------------- threads (queries only: the runtime owns the threads)
 HLE_AS(svc_GetThreadId, "_ZN2nn3svc7aarch644lp6411GetThreadIdEPmNS0_6HandleE") {
+#ifdef _WIN32
+    *(u64*)c->x[0] = (u64)GetCurrentThreadId();
+#else
     *(u64*)c->x[0] = (u64)syscall(SYS_gettid);
+#endif
     c->x[0] = 0;
 }
 HLE_AS(svc_GetThreadPriority, "_ZN2nn3svc7aarch644lp6417GetThreadPriorityEPiNS0_6HandleE") {

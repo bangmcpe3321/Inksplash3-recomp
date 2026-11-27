@@ -155,6 +155,7 @@ enum {
     CMD_DISCARD_DEPTH_STENCIL, CMD_SET_COPY_STRIDES, CMD_DRAW_TEXTURE, CMD_RESOLVE_DEPTH,
     CMD_BIND_TEXTURES_DEFERRED,   // TotK: x[0] stage, x[1] first, x[2] count, x[3] guest handle array read at exec time
     CMD_SET_DEPTH_CLAMP,          // x[0] enable
+    CMD_RESET_COUNTER,            // x[0] NVNcounterType; appended to preserve existing command values
     CMD_COUNT
 };
 

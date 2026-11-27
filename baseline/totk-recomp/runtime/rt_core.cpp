@@ -2,9 +2,55 @@
 #include "rt.h"
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#ifndef _WIN32
+#include "linux/plat_posix.h"
+#endif
+
+bool rt_readable(u64 a, u64 n) {
+    if (!a || n > ~a) return false;
+#ifdef _WIN32
+    const u64 end = a + n;
+    do {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery((void*)a, &mi, sizeof mi) || mi.State != MEM_COMMIT ||
+            (mi.Protect & PAGE_GUARD)) return false;
+        const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                               PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        if (!(mi.Protect & readable)) return false;
+        u64 next = (u64)mi.BaseAddress + mi.RegionSize;
+        if (next <= a) return false;
+        a = next;
+    } while (a < end);
+    return true;
+#else
+    return rt_posix_readable(a, n) != 0;
+#endif
+}
+
+extern "C" bool rt_readable_c(u64 a, u64 n) { return rt_readable(a, n); }
+
+const char* rt_exe_dir() {
+#ifdef _WIN32
+    static const std::string dir = [] {
+        std::wstring path(32768, 0);
+        DWORD n = GetModuleFileNameW(nullptr, path.data(), (DWORD)path.size());
+        if (!n || n >= path.size()) { fprintf(stderr, "[rt] cannot locate executable\n"); abort(); }
+        path.resize(n);
+        path.resize(path.find_last_of(L"/\\"));
+        int bytes = WideCharToMultiByte(CP_UTF8, 0, path.data(), (int)path.size(), nullptr, 0, nullptr, nullptr);
+        std::string utf8(bytes, 0);
+        WideCharToMultiByte(CP_UTF8, 0, path.data(), (int)path.size(), utf8.data(), bytes, nullptr, nullptr);
+        return utf8;
+    }();
+    return dir.c_str();
+#else
+    return rt_posix_exe_dir();
+#endif
+}
 
 // ---- ARMv8 FPRecipEstimate / FPRSqrtEstimate for single precision (FPCR.FZ=0, DN=0, RN), per the ARM ARM pseudocode.
 static u32 recip_estimate(u32 a) {            // 256..511 -> 256..511
@@ -76,27 +122,31 @@ void rt_write_fpcr(Ctx* c, u64 v) { c->fpcr = (u32)v; }   // TODO(R1): map RMode
 void rt_mrs_unknown(Ctx* c, u64 pc) { rt_trap(c, pc, "mrs"); }
 
 [[noreturn]] void rt_trap(Ctx* c, u64 pc, const char* why) {
+    fflush(stdout); // Keep the buffered guest/HLE trace preceding a fatal error.
     fprintf(stderr, "[rt] TRAP at %llx: %s (lr=%llx sp=%llx x0=%llx)\n", (unsigned long long)pc, why,
             (unsigned long long)c->x[30], (unsigned long long)c->sp, (unsigned long long)c->x[0]);
+    if (getenv("TOTK_TRACE_TRAP_REGS")) {
+        for (int i = 0; i < 29; i++) {
+            u64 a = c->x[i];
+            fprintf(stderr, "[rt]   x%-2d=%016llx", i, (unsigned long long)a);
+            if (rt_readable(a, 16)) {
+                const u8* p = (const u8*)a;
+                fprintf(stderr, " bytes:");
+                for (int j = 0; j < 16; j++) fprintf(stderr, " %02x", p[j]);
+            }
+            fprintf(stderr, "\n");
+        }
+    }
     // guest backtrace through the x29 frame chain (frames live on the guest stack, above sp)
     u64 fp = c->x[29];
-    for (int i = 0; i < 24 && fp >= c->sp && fp < c->sp + (256ull << 20) && !(fp & 7); i++) {
+    for (int i = 0; i < 24 && fp >= c->sp && fp < c->sp + (256ull << 20) && !(fp & 7) && rt_readable(fp, 16); i++) {
         u64 nfp = *(u64*)fp, lr = *(u64*)(fp + 8);
         fprintf(stderr, "[rt]   #%-2d lr=%llx\n", i, (unsigned long long)lr);
         if (nfp <= fp) break;
         fp = nfp;
     }
     // x0 is usually `this` of a bad virtual call: dump the object and what it holds as its vtable
-#ifdef _WIN32
-    auto readable = [](u64 a, u64 n) {
-        MEMORY_BASIC_INFORMATION mi;
-        return a && VirtualQuery((void*)a, &mi, sizeof mi) && mi.State == MEM_COMMIT &&
-               !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && a + n <= (u64)mi.BaseAddress + mi.RegionSize;
-    };
-#else
-    auto readable = [](u64 a, u64 n) { return a && rt_posix_readable(a, n) != 0; };   // (runtime/linux/plat_posix.cpp)
-#endif
-    for (u64 a = c->x[0], k = 0; k < 2 && readable(a & ~7ull, 0x80); k++) {
+    for (u64 a = c->x[0], k = 0; k < 2 && rt_readable(a & ~7ull, 0x80); k++) {
         const u64* w = (const u64*)(a & ~7ull);
         fprintf(stderr, "[rt]   %s %llx:", k ? "vtable" : "x0 obj", (unsigned long long)a);
         for (int i = 0; i < 16; i++) fprintf(stderr, "%s%llx", i % 4 ? " " : "\n[rt]     ", (unsigned long long)w[i]);

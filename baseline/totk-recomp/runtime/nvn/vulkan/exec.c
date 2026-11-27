@@ -103,16 +103,41 @@ void vk_collect_dead(void);
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
 #define SUBS 16   // (8 -> 16 for chunked submission, LARECOMP_CHUNK_DRAWS)
+// S3 uses at most a few hundred query segments per submission in PlayerMake;
+// keep pool resets bounded while leaving headroom. Exhaustion invalidates the
+// affected sample report instead of fabricating a result.
+enum { OCCLUSION_QUERY_CAP = 1024, COUNTER_OP_CAP = 8192 };
+typedef enum { COUNTER_RESET, COUNTER_SEGMENT, COUNTER_REPORT } CounterOpKind;
+typedef struct {
+    uint64_t destination;
+    uint32_t query;
+    uint8_t kind, record_valid;
+} CounterOp;
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
     uint64_t seq;
     VkDescriptorPool pools[16];
     int npools, cur_pool;
+    VkQueryPool occlusion_pool;
+    uint32_t occlusion_used, counter_op_count;
+    int occlusion_prepared, occlusion_open;
+    bool occlusion_pool_reset, counter_overflow;
+    CounterOp counter_ops[COUNTER_OP_CAP];
 } Sub;
 static Sub subs[SUBS];
 static int cur_sub;
 static uint64_t submit_seq;  // last submitted
+static pthread_mutex_t counter_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t counter_collect_mu = PTHREAD_MUTEX_INITIALIZER;
+static bool counter_recording, counter_record_valid = true, counter_total_valid = true;
+static uint64_t counter_total;
+static void counter_collect(uint64_t completed);
+static void counter_end_pass(VkCommandBuffer cb);
+static void counter_restart_query_in_pass(VkCommandBuffer cb);
+static int gw_overlap(uint64_t addr, uint64_t size, uint64_t lo, uint64_t hi);
+bool rt_readable_c(uint64_t address, uint64_t size);
+bool rt_main_heap_range_readable_c(uint64_t address, uint64_t size);
 // Chunked submission (LARECOMP_CHUNK_DRAWS=<n>, default 300, 0 = off; run269 vs run270 on Sky Island at the 60 cap:
 // median 50.8 -> 59.9 fps, game fence wait 6.0 -> 1.1 ms, gdev traffic 163 -> 546 MB per 2 s): TotK hands over ~1 big command list per frame and the
 // GPU got it only at the end of backend_execute (~14 ms of translation on Sky Island, run267/268), so the game's fence
@@ -178,6 +203,241 @@ uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
     if (vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v) == VK_SUCCESS) last = v;
     return last;
+}
+
+static bool counter_trace_enabled(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_COUNTER_TRACE") != NULL;
+    return on;
+}
+
+static bool counter_op_push(Sub *s, CounterOpKind kind, uint32_t query, uint64_t destination, bool valid) {
+    if (s->counter_op_count == COUNTER_OP_CAP) {
+        counter_record_valid = false;
+        s->counter_overflow = true;
+        static unsigned warnings;
+        if (warnings++ < 4) LOG("[counter] operation capacity exhausted; affected reports will remain unchanged\n");
+        return false;
+    }
+    s->counter_ops[s->counter_op_count++] = (CounterOp){destination, query, (uint8_t)kind, valid};
+    return true;
+}
+
+static void counter_reset(uint32_t type) {
+    if (type != 1) return;  // NVN_COUNTER_TYPE_SAMPLES_PASSED
+    Sub *s = &subs[cur_sub];
+    if (!g_vk.occlusion_precise) {
+        pthread_mutex_lock(&counter_mu);
+        counter_recording = false;
+        counter_record_valid = false;
+        pthread_mutex_unlock(&counter_mu);
+        return;
+    }
+
+    bool pass_open = in_pass;
+    if (pass_open) {
+        pthread_mutex_lock(&counter_mu);
+        bool pool_ready = s->occlusion_pool_reset;
+        pthread_mutex_unlock(&counter_mu);
+        if (pool_ready) {
+            // End only the old query. A logical reset does not require ending
+            // Vulkan dynamic rendering; the next query can start in this pass.
+            counter_end_pass(vk_cmd());
+        } else {
+            // The query pool reset command must be outside rendering.
+            vk_end_pass();
+            pass_open = false;
+        }
+    }
+    (void)vk_cmd();
+    pthread_mutex_lock(&counter_mu);
+    counter_recording = true;
+    counter_record_valid = true;
+    counter_op_push(s, COUNTER_RESET, 0, 0, true);
+    pthread_mutex_unlock(&counter_mu);
+    if (counter_trace_enabled()) LOG("[counter] ResetCounter type 1 submission %llu (precise queries)\n", (unsigned long long)vk_pending_seq());
+    if (pass_open) counter_restart_query_in_pass(vk_cmd());
+}
+
+static void counter_prepare_pass(VkCommandBuffer cb) {
+    Sub *s = &subs[cur_sub];
+    pthread_mutex_lock(&counter_mu);
+    s->occlusion_prepared = -1;
+    if (counter_recording) {
+        if (!counter_record_valid || s->occlusion_used == OCCLUSION_QUERY_CAP) {
+            counter_record_valid = false;
+            s->occlusion_prepared = -2;
+        } else {
+            if (!s->occlusion_pool) {
+                VkQueryPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+                                            .queryType = VK_QUERY_TYPE_OCCLUSION,
+                                            .queryCount = OCCLUSION_QUERY_CAP};
+                VkResult r = vkCreateQueryPool(g_vk.dev, &ci, NULL, &s->occlusion_pool);
+                if (r != VK_SUCCESS) {
+                    s->occlusion_pool = VK_NULL_HANDLE;
+                    counter_record_valid = false;
+                    s->occlusion_prepared = -2;
+                    static unsigned warnings;
+                    if (warnings++ < 4) LOG("[counter] vkCreateQueryPool failed (%d); sample reports will remain unchanged\n", r);
+                }
+            }
+            if (s->occlusion_pool && counter_record_valid) {
+                if (!s->occlusion_pool_reset) {
+                    // Reset the whole pool once per command-buffer batch. Resetting
+                    // each query before every pass is legal but very expensive on
+                    // drivers with thousands of short dynamic-rendering passes.
+                    vkCmdResetQueryPool(cb, s->occlusion_pool, 0, OCCLUSION_QUERY_CAP);
+                    s->occlusion_pool_reset = true;
+                }
+                uint32_t q = s->occlusion_used++;
+                s->occlusion_prepared = (int)q;
+            }
+        }
+    }
+    pthread_mutex_unlock(&counter_mu);
+}
+
+static void counter_begin_pass(VkCommandBuffer cb) {
+    Sub *s = &subs[cur_sub];
+    pthread_mutex_lock(&counter_mu);
+    if (s->occlusion_prepared >= 0) {
+        uint32_t q = (uint32_t)s->occlusion_prepared;
+        vkCmdBeginQuery(cb, s->occlusion_pool, q, VK_QUERY_CONTROL_PRECISE_BIT);
+        s->occlusion_open = (int)q;
+    } else if (s->occlusion_prepared == -2) {
+        s->occlusion_open = -2;
+    }
+    s->occlusion_prepared = -1;
+    pthread_mutex_unlock(&counter_mu);
+}
+
+static void counter_end_pass(VkCommandBuffer cb) {
+    Sub *s = &subs[cur_sub];
+    pthread_mutex_lock(&counter_mu);
+    if (s->occlusion_open >= 0) {
+        uint32_t q = (uint32_t)s->occlusion_open;
+        vkCmdEndQuery(cb, s->occlusion_pool, q);
+        counter_op_push(s, COUNTER_SEGMENT, q, 0, counter_record_valid);
+        s->occlusion_open = -1;
+    } else if (s->occlusion_open == -2) {
+        counter_op_push(s, COUNTER_SEGMENT, UINT32_MAX, 0, false);
+        s->occlusion_open = -1;
+    }
+    pthread_mutex_unlock(&counter_mu);
+}
+
+static void counter_restart_query_in_pass(VkCommandBuffer cb) {
+    Sub *s = &subs[cur_sub];
+    pthread_mutex_lock(&counter_mu);
+    if (counter_recording && counter_record_valid) {
+        if (!s->occlusion_pool || !s->occlusion_pool_reset || s->occlusion_used == OCCLUSION_QUERY_CAP) {
+            counter_record_valid = false;
+            s->occlusion_open = -2;
+        } else {
+            uint32_t q = s->occlusion_used++;
+            vkCmdBeginQuery(cb, s->occlusion_pool, q, VK_QUERY_CONTROL_PRECISE_BIT);
+            s->occlusion_open = (int)q;
+        }
+    }
+    pthread_mutex_unlock(&counter_mu);
+}
+
+static void counter_report(uint32_t type, uint64_t destination) {
+    if (type != 1) return;
+    pthread_mutex_lock(&counter_mu);
+    bool active = counter_recording;
+    pthread_mutex_unlock(&counter_mu);
+    if (!active) {
+        static unsigned warnings;
+        if (warnings++ < 4) LOG("[counter] samples-passed report without supported reset; destination left unchanged\n");
+        return;
+    }
+    if (in_pass) counter_end_pass(vk_cmd());
+    (void)vk_cmd();  // ensure the report is associated with a real submission/fence
+    Sub *s = &subs[cur_sub];
+    pthread_mutex_lock(&counter_mu);
+    bool valid = counter_record_valid;
+    uint32_t used = s->occlusion_used, ops = s->counter_op_count;
+    counter_op_push(s, COUNTER_REPORT, 0, destination, valid);
+    // Splatoon 3 issues paired ResetCounter/ReportCounter scopes. Stop
+    // recording after the report so unrelated later render passes do not pay
+    // for occlusion queries until the next reset starts a new scope.
+    counter_recording = false;
+    pthread_mutex_unlock(&counter_mu);
+    if (counter_trace_enabled())
+        LOG("[counter] ReportCounter type 1 -> %llx submission %llu (%s, %u queries, %u ops)\n",
+            (unsigned long long)destination, (unsigned long long)vk_pending_seq(),
+            valid ? "pending GPU result" : "invalid scope; destination unchanged", used, ops + 1);
+}
+
+static void counter_collect(uint64_t completed) {
+    if (!completed) return;
+    uint64_t values[OCCLUSION_QUERY_CAP];
+    pthread_mutex_lock(&counter_collect_mu);
+    for (;;) {
+        pthread_mutex_lock(&counter_mu);
+        Sub *s = NULL;
+        for (int i = 0; i < SUBS; i++)
+            if (subs[i].counter_op_count && subs[i].seq <= completed && (!s || subs[i].seq < s->seq)) s = &subs[i];
+        if (!s) {
+            pthread_mutex_unlock(&counter_mu);
+            break;
+        }
+
+        uint32_t query_count = s->occlusion_used;
+        VkQueryPool pool = s->occlusion_pool;
+        uint32_t op_count = s->counter_op_count;
+        uint64_t submission = s->seq;
+        pthread_mutex_unlock(&counter_mu);
+
+        bool results_ok = query_count == 0;
+        if (query_count && pool) {
+            VkResult r = vkGetQueryPoolResults(g_vk.dev, pool, 0, query_count,
+                                               (VkDeviceSize)query_count * sizeof(values[0]), values,
+                                               sizeof(values[0]), VK_QUERY_RESULT_64_BIT);
+            results_ok = r == VK_SUCCESS;
+            if (!results_ok) {
+                static unsigned warnings;
+                if (warnings++ < 4) LOG("[counter] completed query results unavailable (%d); affected reports left unchanged\n", r);
+            }
+        }
+
+        for (uint32_t i = 0; i < op_count; i++) {
+            CounterOp *op = &s->counter_ops[i];
+            if (op->kind == COUNTER_RESET) {
+                counter_total = 0;
+                counter_total_valid = true;
+            } else if (op->kind == COUNTER_SEGMENT) {
+                if (!op->record_valid || !results_ok || op->query >= query_count) {
+                    counter_total_valid = false;
+                } else if (UINT64_MAX - counter_total < values[op->query]) {
+                    counter_total_valid = false;
+                } else {
+                    counter_total += values[op->query];
+                }
+            } else if (op->kind == COUNTER_REPORT && op->record_valid && counter_total_valid && op->destination) {
+                uint64_t lo = submission ? submission - 1 : 0;
+                bool readable = rt_main_heap_range_readable_c(op->destination, 2 * sizeof(uint64_t));
+                if (!readable) readable = rt_readable_c(op->destination, 2 * sizeof(uint64_t));
+                int overlap = gw_overlap(op->destination, 2 * sizeof(uint64_t), lo, submission);
+                if (readable && overlap == 0) {
+                    uint64_t out[2] = {counter_total, SDL_GetTicksNS()};
+                    memcpy((void *)(uintptr_t)op->destination, out, sizeof(out));
+                    if (counter_trace_enabled())
+                        LOG("[counter] completed submission %llu: %llu samples -> %llx\n", (unsigned long long)submission,
+                            (unsigned long long)counter_total, (unsigned long long)op->destination);
+                } else {
+                    static unsigned warnings;
+                    if (warnings++ < 4) LOG("[counter] report destination rejected (readable=%d overlap=%d); left unchanged\n", readable, overlap);
+                }
+            }
+        }
+        pthread_mutex_lock(&counter_mu);
+        s->counter_op_count = 0;
+        s->counter_overflow = false;
+        pthread_mutex_unlock(&counter_mu);
+    }
+    pthread_mutex_unlock(&counter_collect_mu);
 }
 
 // GPU wait time per call site (file:line), printed in the 2-s stats as "| waits site ms/count ..."
@@ -258,6 +518,7 @@ void vk_wait_seq_at(uint64_t seq, const char *file, int line) {
             }
             LOG("[hang] the GPU finished submission %llu after %.1f s: carrying on\n", (unsigned long long)seq, hs);
             fflush(stdout);
+            counter_collect(v);
             return;
         }
         LOG("[hang] after %.1f s: %s; closing the process\n", hs, r == VK_ERROR_DEVICE_LOST ? "the driver reset the GPU (device lost)" : "still stuck");
@@ -278,6 +539,7 @@ void vk_wait_seq_at(uint64_t seq, const char *file, int line) {
         vk_device_fault_report();
         FATAL("vkWaitSemaphores: %d (device lost)\n", r);
     }
+    if (r == VK_SUCCESS) counter_collect(vk_completed_seq());
 }
 
 uint64_t vk_pending_seq(void) { return submit_seq + 1; }
@@ -294,7 +556,15 @@ static Sub *sub(void) {
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
         s->cur_pool = 0;
+        pthread_mutex_lock(&counter_mu);
+        s->counter_op_count = 0;
+        s->counter_overflow = false;
+        s->occlusion_used = 0;
+        s->occlusion_pool_reset = false;
+        s->occlusion_prepared = -1;
+        s->occlusion_open = -1;
         s->seq = submit_seq + 1;
+        pthread_mutex_unlock(&counter_mu);
         s->main_begun = s->upload_begun = false;
     }
     return s;
@@ -1610,7 +1880,9 @@ static void vk_end_pass_at(int line) {
     if (line >= 0) { pass_barrier_needed = true; pbn_cause = line < 8192 ? line : 0; }   // (our own work outside a pass follows: the next pass waits for it)
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
-    vkCmdEndRendering(vk_cmd());
+    VkCommandBuffer cb = vk_cmd();
+    counter_end_pass(cb);
+    vkCmdEndRendering(cb);
     in_pass = false;
     depth_live_in_pass = false;
     static int imgbar = -1;
@@ -1916,7 +2188,9 @@ static void begin_pass(void) {
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
     uint64_t z3 = prof ? prof_now() : 0;
+    counter_prepare_pass(cb);
     vkCmdBeginRendering(cb, &ri);
+    counter_begin_pass(cb);
     in_pass = true;
     if (prof) { prof_bpz[3] += prof_now() - z3; prof_bp += prof_now() - bp_t0; prof_bp_view += bp_tv; }
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
@@ -4886,22 +5160,28 @@ static uint64_t gdev_blk[GDEV_BLKS];
 enum { GW_N = 8192 };
 static struct { uint64_t addr, size, seq; } gw_e[GW_N];
 static uint64_t gw_head, gw_lost;   // gw_lost: the newest submission among entries the ring overwrote
+static pthread_mutex_t gw_mu = PTHREAD_MUTEX_INITIALIZER;
 static void gw_push(uint64_t addr, uint64_t size, uint64_t seq) {
+    pthread_mutex_lock(&gw_mu);
     for (uint64_t k = gw_head; k > 0 && k + 16 > gw_head; k--) {   // (bindings alternate among a few buffers)
         const typeof(gw_e[0]) *p = &gw_e[(k - 1) % GW_N];
-        if (p->addr == addr && p->size == size && p->seq == seq) return;
+        if (p->addr == addr && p->size == size && p->seq == seq) { pthread_mutex_unlock(&gw_mu); return; }
     }
     if (gw_head >= GW_N && gw_e[gw_head % GW_N].seq > gw_lost) gw_lost = gw_e[gw_head % GW_N].seq;
     gw_e[gw_head++ % GW_N] = (typeof(gw_e[0])){addr, size, seq};
+    pthread_mutex_unlock(&gw_mu);
 }
 static int gw_overlap(uint64_t addr, uint64_t size, uint64_t lo, uint64_t hi) {   // 1: a submission in (lo, hi] writes a byte of
-    if (gw_lost > lo) return -1;                                                    // the range, 0: none, -1: unknown (ring lost it)
+    int result = 0;
+    pthread_mutex_lock(&gw_mu);
+    if (gw_lost > lo) result = -1;                                                  // the range, 0: none, -1: unknown (ring lost it)
     for (uint64_t k = gw_head; k > 0 && k + GW_N > gw_head; k--) {
         const typeof(gw_e[0]) *p = &gw_e[(k - 1) % GW_N];
         if (p->seq <= lo) break;   // (submissions never decrease along the ring)
-        if (p->seq <= hi && addr < p->addr + p->size && p->addr < addr + size) return 1;
+        if (p->seq <= hi && addr < p->addr + p->size && p->addr < addr + size) { result = 1; break; }
     }
-    return 0;
+    pthread_mutex_unlock(&gw_mu);
+    return result;
 }
 static bool live_pages(void) {
     static int on = -1;
@@ -5079,8 +5359,10 @@ static bool gdev_carry_ok(void) {
 }
 static void gdev_carry(uint64_t from, uint64_t to) {
     for (int i = 0; i < gdev_n; i++) if (gdev_reg[i].seq == from) gdev_reg[i].seq = to;
+    pthread_mutex_lock(&gw_mu);
     for (uint64_t k = gw_head; k > 0 && k + GW_N > gw_head && gw_e[(k - 1) % GW_N].seq >= from; k--)   // (newest entries)
         if (gw_e[(k - 1) % GW_N].seq == from) gw_e[(k - 1) % GW_N].seq = to;
+    pthread_mutex_unlock(&gw_mu);
     if (gdev_lv_seq == from) gdev_lv_seq = to;
 }
 
@@ -5421,6 +5703,7 @@ static bool heap_mirror(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSiz
             if (pg[i] != 3) continue;
             uint64_t iv[8][2];   // the page's in-flight written bytes (merged: one copy per byte)
             int ni = 0;
+            pthread_mutex_lock(&gw_mu);
             for (uint64_t k = gw_head; k > 0 && k + GW_N > gw_head && gw_e[(k - 1) % GW_N].seq > done; k--) {
                 const typeof(gw_e[0]) *p = &gw_e[(k - 1) % GW_N];
                 uint64_t a = p->addr - HEAP_BASE > o ? p->addr - HEAP_BASE : o, e = p->addr - HEAP_BASE + p->size < o + l ? p->addr - HEAP_BASE + p->size : o + l;
@@ -5431,6 +5714,7 @@ static bool heap_mirror(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSiz
                 if (j == ni && ni < 8) { iv[ni][0] = a; iv[ni][1] = e; ni++; }
                 else if (j == ni) { ni = 1; iv[0][0] = o; iv[0][1] = o + l; break; }   // (too many: the whole page, after the snapshot)
             }
+            pthread_mutex_unlock(&gw_mu);
             for (int j = 0; j < ni; j++)
                 for (int m = j + 1; m < ni; m++)   // (merges made above can now touch a later interval)
                     if (iv[m][0] <= iv[j][1] && iv[j][0] <= iv[m][1]) {
@@ -5577,6 +5861,22 @@ static void bind_index(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkIndexTy
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
+    counter_collect(vk_completed_seq());
+    pthread_mutex_lock(&counter_collect_mu);
+    pthread_mutex_lock(&counter_mu);
+    counter_recording = false;
+    counter_record_valid = counter_total_valid = true;
+    counter_total = 0;
+    for (int i = 0; i < SUBS; i++) {
+        subs[i].counter_op_count = 0;
+        subs[i].counter_overflow = false;
+        subs[i].occlusion_used = 0;
+        subs[i].occlusion_pool_reset = false;
+        subs[i].occlusion_prepared = -1;
+        subs[i].occlusion_open = -1;
+    }
+    pthread_mutex_unlock(&counter_mu);
+    pthread_mutex_unlock(&counter_collect_mu);
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
     g_memo_gen++;   // (draw memos: get_program, the pipeline key)
@@ -7047,7 +7347,7 @@ static void debug_probe(Prog *pr) {
     if (qx < 0 && flame_probe_x >= 0) { qx = flame_probe_x; qy = flame_probe_y; rel = true; }
     if (qx < 0 || !st.rt.ncolor) return;
     ndraw++;
-    if (in_pass) { vkCmdEndRendering(vk_cmd()); in_pass = false; blk_copy_back(vk_cmd()); }
+    if (in_pass) { VkCommandBuffer cb = vk_cmd(); counter_end_pass(cb); vkCmdEndRendering(cb); in_pass = false; blk_copy_back(cb); }
     RtState rts = st.rt;
     VkSpan s = vk_readback(16 * 9);
     VkCommandBuffer cb = vk_cmd();
@@ -7142,7 +7442,7 @@ static void debug_probe_row(Prog *pr) {
     }
     if (!nrows || !st.rt.ncolor) return;
     ndraw++;
-    if (in_pass) { vkCmdEndRendering(vk_cmd()); in_pass = false; blk_copy_back(vk_cmd()); }
+    if (in_pass) { VkCommandBuffer cb = vk_cmd(); counter_end_pass(cb); vkCmdEndRendering(cb); in_pass = false; blk_copy_back(cb); }
     RtState rts = st.rt;
     enum { MAXW = 4096, STRIDE = MAXW * 16 };
     VkSpan s = vk_readback((uint64_t)STRIDE * 8 * 4);
@@ -8253,6 +8553,9 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         }
+        case CMD_RESET_COUNTER:
+            counter_reset((uint32_t)r->x[0]);
+            break;
         case CMD_REPORT_COUNTER: {
             // The game times its GPU work with these (two per frame) and drops to 30 fps when that looks slow;
             // the value is our translation time, not GPU time. LARECOMP_VK_COUNTER=frozen: the same timestamp for
@@ -8261,6 +8564,10 @@ static void exec_list(uint64_t handle, int depth) {
             uint32_t type = (uint32_t)r->x[0];
             static uint32_t seen;
             if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
+            if (type == 1) {
+                counter_report(type, r->x[1]);
+                break;
+            }
             // LARECOMP_VK_COUNTER=scale:<k> (probe, 2026-10-18): the reported clock runs k times faster, so every interval
             // the game measures looks k times longer -> its dynamic resolution sees a 30-fps budget overrun at 90 fps (k 3).
             // TOTK_DYNRES=1 (Graphics menu "Dynamic resolution"): k = TOTK_FPS / 30, so the game's resolution scaler aims at
@@ -8280,16 +8587,7 @@ static void exec_list(uint64_t handle, int depth) {
             static uint64_t frame_seen = ~0ull, frame_ts;
             extern uint64_t vk_frame_counter(void);
             if (frozen && vk_frame_counter() != frame_seen) { frame_seen = vk_frame_counter(); frame_ts = SDL_GetTicksNS(); }
-            // type 1 = SAMPLES_PASSED: TotK resets it (nvnCommandBufferResetCounter(1)) and reads it back as an occlusion
-            // query. Reporting 0 made every queried light / flame "occluded": Zelda's torch lit the hall only while the
-            // camera was close to it (user 2026-10-14 22:40). Until real Vulkan occlusion queries exist, report "visible":
-            // a count that grows by 4096 per report (so both "since reset" and "end - begin" reads are > 0).
-            // LARECOMP_OCCLUSION=zero = the old behaviour (A/B).
-            static int occl_zero = -1;
-            if (occl_zero < 0) { const char *e = getenv("LARECOMP_OCCLUSION"); occl_zero = e && !strcmp(e, "zero"); }
-            static uint64_t samples;
             uint64_t v = 0;
-            if (type == 1 && !occl_zero) v = samples += 4096;
             // LARECOMP_COUNTER_TYPES=<t>[,<t>...] (probe): scale only those counter types (TotK reports 0, 1 and 16). d82
             // (OBSERVED): with the x3 clock, 64 frames >= 14 ms in the light stretch (spaced in multiples of 60 frames,
             // "other" = game threads +4 ms, 0 images, no resolution change) vs 18 unscaled: which reads cause them?

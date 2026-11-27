@@ -446,6 +446,8 @@ RT_INLINE void call_ind(Ctx* c, u64 t) {
     else rt_call_indirect(c, t);
 }
 [[noreturn]] void rt_trap(Ctx* c, u64 pc, const char* why);
+bool rt_readable(u64 address, u64 size);
+const char* rt_exe_dir();
 void rt_mrs_unknown(Ctx* c, u64 pc);
 u64  rt_read_fpcr(Ctx* c);
 void rt_write_fpcr(Ctx* c, u64 v);

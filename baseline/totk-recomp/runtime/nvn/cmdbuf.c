@@ -580,7 +580,7 @@ PLAIN(nvnCommandBufferSignalEvent, CMD_SIGNAL_EVENT)
 PLAIN(nvnCommandBufferWaitEvent, CMD_WAIT_EVENT)
 PLAIN(nvnCommandBufferReportCounter, CMD_REPORT_COUNTER)
 STUB(nvnCommandBufferReportValue)
-STUB(nvnCommandBufferResetCounter)
+PLAIN(nvnCommandBufferResetCounter, CMD_RESET_COUNTER)
 NVN(nvnCommandBufferCallCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferCopyCommands) { record_copy(c, CMD_CALL, 2, (uint32_t)A(1) * 8); }
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }

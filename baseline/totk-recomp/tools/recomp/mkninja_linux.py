@@ -62,12 +62,8 @@ def esc(p):                       # ninja path escaping
 rt_cpp = sorted(glob.glob(os.path.join(RT, '*.cpp'))) + [os.path.join(RT, 'linux', 'plat_posix.cpp')]
 nvn_c = sorted(glob.glob(os.path.join(RT, 'nvn', '*.c')))
 vk_c, mw_c = [], []
-if null:
-    # all of nvn/*.c including backend_null.c; the vulkan/ and maxwell/ trees are not built. runtime/linux/null_stubs.c supplies the
-    # few symbols the runtime takes from the Vulkan backend (totk_hooks.c / exec.c / device.c)
-    nvn_c.append(os.path.join(RT, 'linux', 'null_stubs.c'))
-else:
-    nvn_c = [s for s in nvn_c if os.path.basename(s) != 'backend_null.c']
+if not null:
+    nvn_c = [s for s in nvn_c if os.path.basename(s) not in ('backend_null.c', 'null_stubs.c')]
     vk_c = [s for s in sorted(glob.glob(os.path.join(RT, 'nvn', 'vulkan', '*.c'))) if os.path.basename(s) != 'shim_win.c']
     vk_c.append(os.path.join(RT, 'linux', 'shim_sdl3.c'))
     mw_c = sorted(glob.glob(os.path.join(RT, 'nvn', 'maxwell', '*.c')))

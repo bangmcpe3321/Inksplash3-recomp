@@ -34,7 +34,7 @@ typedef struct {
     VkPipelineCache pcache;
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
-    bool custom_border, divisor, host_import, dmabuf_import;
+    bool custom_border, divisor, host_import, dmabuf_import, occlusion_precise;
     bool gpl;  // VK_EXT_graphics_pipeline_library with fast linking (exec.c: per-program shader libraries, linked per draw state)
     bool feedback_loop;  // attachment feedback loops declared to the driver (device.c: EXT layout + dynamic state, unified layouts)
     bool checkpoints;  // VK_NV_device_diagnostic_checkpoints: exec.c marks every GPU operation (hang reports)

@@ -259,19 +259,19 @@ extern "C" [[noreturn]] void rt_fatal_guest(const char* msg) {
 extern "C" u64 g_rt_heap_base;   // hle_os_mem.cpp (also declared below; this one is needed by the helper above it)
 static bool trace_str_at(const u64 a, const char** out) {
     if (a < 0x1000) return false;
-    if (!rt_posix_readable(a, 8)) return false;
+    if (!rt_readable(a, 8)) return false;
     const u8* p = (const u8*)a;
     if (p[0] < 0x20 || p[0] >= 0x7f) return false;   // not characters: try a SafeStringBase (chars pointer at +8)
     int n = 0;
-    while (n < 64 && rt_posix_readable(a + n, 1) && p[n] >= 0x20 && p[n] < 0x7f) n++;
-    if (n >= 4 && rt_posix_readable(a + n, 1) && p[n] == 0) { *out = (const char*)a; return true; }
+    while (n < 64 && rt_readable(a + n, 1) && p[n] >= 0x20 && p[n] < 0x7f) n++;
+    if (n >= 4 && rt_readable(a + n, 1) && p[n] == 0) { *out = (const char*)a; return true; }
     return false;
 }
 static bool trace_str(const u64 a) {
     const char* s = nullptr;
     if (trace_str_at(a, &s)) { printf("[trace %5lu]   \"%s\"\n", GetCurrentThreadId(), s); return true; }
     // SafeStringBase / std::string-like: the characters are behind a pointer in the object
-    if (!rt_posix_readable(a, 16)) return false;
+    if (!rt_readable(a, 16)) return false;
     const u64 inner = ((const u64*)a)[1];
     if (inner && trace_str_at(inner, &s)) { printf("[trace %5lu]   \"%s\"\n", GetCurrentThreadId(), s); return true; }
     return false;
@@ -660,15 +660,7 @@ static void profile_threads(int samples, int ms) {
 #endif
 static void watchdog_dump() {
     profile_threads(100, 20);
-#ifdef _WIN32
-    auto readable = [](u64 a) {
-        MEMORY_BASIC_INFORMATION mi;
-        return a && !(a & 7) && VirtualQuery((void*)a, &mi, sizeof mi) && mi.State == MEM_COMMIT &&
-               !(mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) && a + 16 <= (u64)mi.BaseAddress + mi.RegionSize;
-    };
-#else
-    auto readable = [](u64 a) { return a && !(a & 7) && rt_posix_readable(a, 16) != 0; };
-#endif
+    auto readable = [](u64 a) { return !(a & 7) && rt_readable(a, 16); };
     std::lock_guard<std::mutex> l(g_threads_mtx);
     printf("[watchdog] %zu guest threads\n", g_threads.size());
     for (auto& t : g_threads) {
@@ -760,12 +752,8 @@ int main(int argc, char** argv) {
 #endif
     // flush once a second: a run killed by `timeout` otherwise loses its last 64 KiB of log (run83 lost its ending)
     CloseHandle(CreateThread(nullptr, 0, [](LPVOID) -> DWORD { for (;;) { Sleep(1000); fflush(stdout); fflush(stderr); } }, nullptr, 0, nullptr));
-#ifdef _WIN32
-    std::string dir = argc > 1 ? argv[1] : "C:/totk/extract/img";
-#else
     // the decompressed NSO images (tools/nso.py): argv[1], else $TOTK_IMG, else <exe dir>/data/img
-    std::string dir = argc > 1 ? argv[1] : getenv("TOTK_IMG") && *getenv("TOTK_IMG") ? getenv("TOTK_IMG") : std::string(rt_posix_exe_dir()) + "/data/img";
-#endif
+    std::string dir = argc > 1 ? argv[1] : getenv("TOTK_IMG") && *getenv("TOTK_IMG") ? getenv("TOTK_IMG") : std::string(rt_exe_dir()) + "/data/img";
     if (g_imp_count > (u64)kMaxImports) die("too many imports %llu", g_imp_count);
     for (u32 i = 0; i < g_imp_count; i++) g_imp_index[g_imp_names[i]] = i;
 

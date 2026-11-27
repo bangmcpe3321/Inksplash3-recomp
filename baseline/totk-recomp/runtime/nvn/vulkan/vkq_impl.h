@@ -11,7 +11,8 @@ enum {
     QOP_WRAP, QOP_BEGIN, QOP_END, QOP_DRAW, QOP_DRAWIDX, QOP_DISPATCH, QOP_PIPE, QOP_SETS, QOP_PUSH, QOP_VBUF, QOP_IBUF,
     QOP_VIEWPORT, QOP_SCISSOR, QOP_BLENDC, QOP_DBIAS, QOP_DBIAS_EN, QOP_DTEST, QOP_DWRITE, QOP_DCMP, QOP_STEST, QOP_SOP, QOP_SCMASK,
     QOP_SWMASK, QOP_SREF, QOP_CULL, QOP_FRONT, QOP_TOPO, QOP_RESTART, QOP_BEGINR, QOP_ENDR, QOP_BARRIER, QOP_CPBUF, QOP_CPIMG,
-    QOP_CPB2I, QOP_CPI2B, QOP_BLIT, QOP_RESOLVE, QOP_CLRCOL, QOP_CLRDS, QOP_CLRATT, QOP_QRESET, QOP_TS, QOP_FBL
+    QOP_CPB2I, QOP_CPI2B, QOP_BLIT, QOP_RESOLVE, QOP_CLRCOL, QOP_CLRDS, QOP_CLRATT, QOP_QRESET, QOP_TS, QOP_FBL,
+    QOP_QBEGIN, QOP_QEND
 };
 typedef struct { uint32_t op, size; VkCommandBuffer cb; } QHdr;   // size: whole record, header included
 static uint8_t *q_buf;
@@ -333,10 +334,18 @@ void q_vkCmdClearAttachments(VkCommandBuffer cb, uint32_t n, const VkClearAttach
     QEXTRA(QOP_CLRATT, cb, QClrAtt, n * sizeof *at + nr * sizeof *r + 16);
     a->n = n; a->nr = nr; QCOPY(a->at, at, n * sizeof *at); QCOPY(a->r, r, nr * sizeof *r); q_commit();
 }
-typedef struct { VkQueryPool p; uint32_t a, b; VkPipelineStageFlags2 st; } QQuery;
+typedef struct { VkQueryPool p; uint32_t a, b; VkPipelineStageFlags2 st; VkQueryControlFlags flags; } QQuery;
 void q_vkCmdResetQueryPool(VkCommandBuffer cb, VkQueryPool p, uint32_t first, uint32_t n) {
     if (!vkq_enabled()) { (vkCmdResetQueryPool)(cb, p, first, n); return; }
     QREC(QOP_QRESET, cb, QQuery); a->p = p; a->a = first; a->b = n; q_commit();
+}
+void q_vkCmdBeginQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t query, VkQueryControlFlags flags) {
+    if (!vkq_enabled()) { (vkCmdBeginQuery)(cb, p, query, flags); return; }
+    QREC(QOP_QBEGIN, cb, QQuery); a->p = p; a->a = query; a->flags = flags; q_commit();
+}
+void q_vkCmdEndQuery(VkCommandBuffer cb, VkQueryPool p, uint32_t query) {
+    if (!vkq_enabled()) { (vkCmdEndQuery)(cb, p, query); return; }
+    QREC(QOP_QEND, cb, QQuery); a->p = p; a->a = query; q_commit();
 }
 void q_vkCmdWriteTimestamp2(VkCommandBuffer cb, VkPipelineStageFlags2 st, VkQueryPool p, uint32_t q) {
     if (!vkq_enabled()) { (vkCmdWriteTimestamp2)(cb, st, p, q); return; }
@@ -400,6 +409,8 @@ static void q_exec(const QHdr *h) {
     case QOP_CLRDS: { const QClr *a = p; (vkCmdClearDepthStencilImage)(cb, (VkImage)a->img, a->l, &a->v.depthStencil, a->n, a->r); break; }
     case QOP_CLRATT: { const QClrAtt *a = p; (vkCmdClearAttachments)(cb, a->n, a->at, a->nr, a->r); break; }
     case QOP_QRESET: { const QQuery *a = p; (vkCmdResetQueryPool)(cb, a->p, a->a, a->b); break; }
+    case QOP_QBEGIN: { const QQuery *a = p; (vkCmdBeginQuery)(cb, a->p, a->a, a->flags); break; }
+    case QOP_QEND: { const QQuery *a = p; (vkCmdEndQuery)(cb, a->p, a->a); break; }
     case QOP_TS: { const QQuery *a = p; (vkCmdWriteTimestamp2)(cb, a->st, a->p, a->a); break; }
     case QOP_FBL: { const QFbl *a = p; a->fn(cb, a->m); break; }
     default: FATAL("[vkq] bad record op %u\n", h->op);

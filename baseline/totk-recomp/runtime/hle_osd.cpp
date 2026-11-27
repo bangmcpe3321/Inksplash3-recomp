@@ -3,6 +3,7 @@
 // before present, bottom left. Only the render thread calls osd_banner().
 // Linux: the same blocks rendered with stb_truetype (runtime/linux/stb_truetype.h, public domain) from a TrueType font file:
 // $TOTK_FONT, <exe dir>/data/fonts/DejaVuSans-Bold.ttf, then the usual system font directories; no font = no on-screen text.
+#include "rt.h"
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -230,7 +231,7 @@ static std::string settings_path() {
     if (const char* f = getenv("TOTK_SETTINGS_FILE")) return f;
     const char* u = getenv("TOTK_USERDATA");
 #ifdef _WIN32
-    std::string d = u && *u ? u : "C:/totk/userdata";
+    std::string d = u && *u ? u : std::string(rt_exe_dir()) + "/userdata";
 #else
     const char* x = getenv("XDG_DATA_HOME"); const char* hm = getenv("HOME");
     std::string d = u && *u ? u : (x && *x ? std::string(x) : std::string(hm && *hm ? hm : ".") + "/.local/share") + "/totk-recomp/userdata";

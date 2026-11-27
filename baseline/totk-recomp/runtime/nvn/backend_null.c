@@ -26,5 +26,9 @@ uint64_t plat_now_ns(void) {
     QueryPerformanceCounter(&t);
     return (uint64_t)((__uint128_t)t.QuadPart * 1000000000u / (uint64_t)f.QuadPart);
 }
+#ifdef _WIN32
+// rt_main's optional indirect-call timestamps use this renderer clock spelling.
+uint64_t SDL_GetTicksNS(void) { return plat_now_ns(); }
+#endif
 // main thread parks here (rt_main.cpp); the boot watcher thread ends the process when nnMain returns
 int ui_run(void) { for (;;) Sleep(1000); }
