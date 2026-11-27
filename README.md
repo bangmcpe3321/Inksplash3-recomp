@@ -1,8 +1,9 @@
 # Inksplash3-recomp
 
-Static recompilation of **Splatoon 3** (base title `0100C2500FC20000`, USA v65536) to native
-Linux x86-64, built on the MIT-licensed [totk-recomp](https://github.com/Muhammad1259-sigma/totk-recomp)
-runtime and NVN-on-Vulkan renderer.
+Native x64 Windows static recompilation of **Splatoon 3 v12.0.0** (base title
+`0100C2500FC20000`, update title `0100C2500FC20800`), built on the MIT-licensed
+[totk-recomp](https://github.com/Muhammad1259-sigma/totk-recomp) runtime and NVN-on-Vulkan renderer.
+The Windows port is experimental; see [`STATUS.md`](STATUS.md) for its tested scope.
 
 This work builds on [azlekayn's Inksplash3-recomp](https://github.com/azlekayn/Inksplash3-recomp)
 and the game-agnostic runtime fixes developed while getting Splatoon 2 to boot, render its title
@@ -24,10 +25,10 @@ See [`STATUS.md`](STATUS.md). Nothing is claimed to work until a logged run show
 Game data (ExeFS, RomFS, keys, saves), generated C++ and build output live **outside** this
 repository, under the work directory, and are never committed.
 
-## Build and run (Linux)
+## Existing Linux build scripts
 
-The build container is `localhost/engage-linux-build:latest`; the work tree is mounted at `/w`
-(the host path contains a space). Host-side wrappers:
+The repository retains its original Linux container workflow (`localhost/engage-linux-build:latest`)
+for the Linux build. Its work tree is mounted at `/w` (the host path contains a space); wrappers:
 
 ```sh
 scripts/build-null.sh          # headless binary   -> /w/build-null/totk
